@@ -1,0 +1,36 @@
+# HoloBridge OS v1.2 Minimum Viable Country Node Template
+node:
+  node_id: ''
+  node_name: ''
+  country: ''
+  region_or_province: ''
+  city_or_community: ''
+  pilot_duration_days: 90
+  version: '1.2'
+  status: DRAFT
+  language:
+    primary_languages: []
+    caption_languages: []
+  cultural_authority:
+    governing_community_or_organization: ''
+    sponsor_influence_on_stories: NONE
+  accessibility:
+    wcag_target: WCAG 2.2 AA
+    captions_required: true
+    ai_disclosure_required: true
+  ai_persona:
+    persona_name: ''
+    refusal_policy: REFUSE_INSTEAD_OF_GUESS
+    ai_disclosure_text: 'This is an AI persona, not a human.'
+  tourism_or_learning_trail:
+    trail_name: ''
+    number_of_stops: 0
+    offline_mode_available: true
+  evidence_and_assurance:
+    evidence_passport_id: ''
+    reproducibility_passport_id: ''
+  claims_and_limits:
+    validated_results: false
+    pilot_completed: false
+    economic_model_is_forecast: false
+    public_claim_rule: NO_VERIFIED_LOWER_BOUND_NO_HEADLINE

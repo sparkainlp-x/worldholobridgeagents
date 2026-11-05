@@ -1,0 +1,31 @@
+{
+  "evidence_passport_id": "",
+  "country_node_id": "",
+  "version": "1.2",
+  "status": "DRAFT",
+  "metrics": {
+    "stories_published": 0,
+    "languages_supported": 0,
+    "community_contributors": 0,
+    "persona_sessions": 0,
+    "persona_refusals": 0,
+    "nfc_or_qr_interactions": 0,
+    "offline_interactions": 0,
+    "event_attendance": 0,
+    "accessibility_issues_found": 0,
+    "accessibility_issues_resolved": 0,
+    "safety_checks_completed": 0,
+    "safety_incidents": 0,
+    "near_misses": 0,
+    "failed_experiments_documented": 0
+  },
+  "claims": {
+    "validated_results": false,
+    "pilot_completed": false,
+    "medical_or_therapeutic_claim": false,
+    "machine_consciousness_claim": false,
+    "nft_financial_return_claim": false,
+    "economic_model_is_forecast": false,
+    "public_claim_rule": "NO_VERIFIED_LOWER_BOUND_NO_HEADLINE"
+  }
+}
