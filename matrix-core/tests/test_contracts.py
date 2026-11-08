@@ -54,16 +54,25 @@ class ContractTests(unittest.TestCase):
     def test_all_examples_validate_and_references_resolve(self):
         validator = Draft202012Validator(SCHEMA, format_checker=FormatChecker())
         example_dir = ROOT / "examples"
-        for path in sorted(example_dir.glob("*.json")):
+        paths = sorted(example_dir.glob("*.json"))
+        self.assertGreaterEqual(len(paths), 3)
+        found_types = set()
+        for path in paths:
             with self.subTest(path=path.name):
                 document = json.loads(
                     path.read_text(encoding="utf-8"),
                     object_pairs_hook=_unique_pairs,
                 )
                 records = document.get("records", [document])
+                self.assertTrue(records)
                 for record in records:
                     validator.validate(record)
+                    found_types.add(record["record_type"])
                 self.assertEqual(validate_records(records), ())
+        self.assertTrue(
+            {"installation", "organization", "partner_engagement", "payment_intent"}
+            .issubset(found_types)
+        )
 
     def test_envelope_and_nested_objects_are_closed(self):
         records = activation_records()
@@ -89,6 +98,12 @@ class ContractTests(unittest.TestCase):
         installation = next(row for row in records if row["record_type"] == "installation")
         installation["required_check_types"] = []
         self.assertTrue(validate_records(records))
+        from matrix_core.policy import decide_activation
+        from support import NOW, INSTALLATION, actor
+        self.assertIn(
+            "SCHEMA_INVALID:$",
+            decide_activation(records, INSTALLATION, actor(), NOW).reason_codes,
+        )
 
     def test_cross_tenant_links_are_rejected(self):
         records = activation_records()

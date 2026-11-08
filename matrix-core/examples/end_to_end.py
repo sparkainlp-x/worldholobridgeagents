@@ -44,7 +44,9 @@ def _finance_records():
         idempotency_key="synthetic-demo-key-0001", request_digest="0" * 64,
         authorization_id=AUTHORIZATION, reconciliation_evidence_id=None,
     )
-    intent["request_digest"] = canonical_request_digest(intent, OPERATOR, 1)
+    intent["request_digest"] = canonical_request_digest(
+        intent, OPERATOR, 1, "finance_approver"
+    )
     auth = _record(
         "authorization", AUTHORIZATION, environment="sandbox", target_id=PAYMENT,
         target_revision=1, request_digest=intent["request_digest"],
@@ -54,6 +56,18 @@ def _finance_records():
     return [
         intent,
         auth,
+        _record("participant", OPERATOR, environment="sandbox", status="active"),
+        *[
+            _record(
+                "actor_permission", f"74000000-0000-4000-8000-00000000000{index}",
+                environment="sandbox", actor_id=OPERATOR,
+                actor_role="finance_approver", action=action, target_id=PAYMENT,
+                active=True, valid_until=EXPIRY, revoked_at=None,
+            )
+            for index, action in enumerate(
+                ("reserve_payment", "mark_payment_unknown", "reconcile_payment"), 1
+            )
+        ],
         _record(
             "funding_case", FUNDING, environment="sandbox", status="approved",
             currency="CAD", approved_amount_minor=5000,
@@ -161,10 +175,15 @@ def run_demo():
         id="91000000-0000-4000-8000-000000000001",
         idempotency_key="synthetic-demo-key-0002",
     )
-    replay["request_digest"] = canonical_request_digest(replay, OPERATOR, 1)
+    replay["request_digest"] = canonical_request_digest(
+        replay, OPERATOR, 1, "finance_approver"
+    )
     replay_records.append(replay)
     replay_store = ReferenceStore(replay_records)
-    finance_actor = {"id": OPERATOR, "tenant_id": TENANT, "role": "finance_approver"}
+    finance_actor = {
+        "id": OPERATOR, "tenant_id": TENANT, "environment": "sandbox",
+        "role": "finance_approver",
+    }
     first_reservation = replay_store.reserve_payment(PAYMENT, finance_actor, NOW, 1)[0]
     replayed_authorization = replay_store.reserve_payment(
         replay["id"], finance_actor, NOW, 1

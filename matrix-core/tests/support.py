@@ -38,9 +38,10 @@ def activation_records():
     return [
         record(
             "installation", INSTALLATION, status="draft",
+            installation_policy_version="matrix-installation-v0.1.0",
             participant_ids=[PARTICIPANT], plan_version_id=PLAN,
             equipment_manifest_version_id=MANIFEST,
-            required_check_types=["physical_safety"],
+            required_check_types=["accessibility", "physical_safety"],
             configuration_version="cfg-1", stop_requested=False,
             arena_enabled=True, arena_score=0,
         ),
@@ -62,8 +63,14 @@ def activation_records():
             role="tenant_admin", active=True, valid_until=None,
         ),
         record(
+            "membership", "45000000-0000-4000-8000-000000000001",
+            installation_id=INSTALLATION, participant_id=PARTICIPANT,
+            role="participant", active=True, valid_until=None,
+        ),
+        record(
             "consent", "51000000-0000-4000-8000-000000000001",
-            participant_id=PARTICIPANT, purpose="installation_activation",
+            installation_id=INSTALLATION, participant_id=PARTICIPANT,
+            purpose="installation_activation",
             recipient="matrix-core", field_scopes=["installation_status"],
             valid_from=STAMP, expires_at=LATER, revoked_at=None,
         ),
@@ -81,9 +88,16 @@ def activation_records():
             reviewed_by=FACILITATOR, completed_at=STAMP, expires_at=LATER,
         ),
         record(
+            "installation_check", "63000000-0000-4000-8000-000000000001",
+            installation_id=INSTALLATION, check_type="accessibility",
+            status="passed", configuration_version="cfg-1",
+            reviewed_by=FACILITATOR, completed_at=STAMP, expires_at=LATER,
+        ),
+        record(
             "participant_acceptance", "52000000-0000-4000-8000-000000000001",
             installation_id=INSTALLATION, participant_id=PARTICIPANT,
             plan_version_id=PLAN, equipment_manifest_version_id=MANIFEST,
+            configuration_version="cfg-1",
             accepted_at=STAMP, withdrawn_at=None,
         ),
     ]
@@ -104,7 +118,7 @@ def finance_records(amount=100, limit=150):
         authorization_id=AUTHORIZATION, reconciliation_evidence_id=None,
     )
     intent["request_digest"] = canonical_request_digest(
-        intent, FACILITATOR, intent["revision"]
+        intent, FACILITATOR, intent["revision"], "finance_approver"
     )
     authorization = record(
         "authorization", AUTHORIZATION, environment="sandbox",
@@ -115,6 +129,19 @@ def finance_records(amount=100, limit=150):
     return [
         intent,
         authorization,
+        record("participant", FACILITATOR, environment="sandbox", status="active"),
+        *[
+            record(
+                "actor_permission",
+                f"75000000-0000-4000-8000-00000000000{index}",
+                environment="sandbox", actor_id=FACILITATOR,
+                actor_role="finance_approver", action=action, target_id=PAYMENT,
+                active=True, valid_until=LATER, revoked_at=None,
+            )
+            for index, action in enumerate(
+                ("reserve_payment", "mark_payment_unknown", "reconcile_payment"), 1
+            )
+        ],
         record(
             "funding_case", FUNDING, environment="sandbox",
             status="approved", currency="CAD",
@@ -165,11 +192,13 @@ def referral_records():
         record(
             "organization", organization_id, name="Synthetic organization",
             jurisdiction="CA-NB", status="verified",
+            authorized_recipients=["synthetic-provider"],
             verification_evidence_id=organization_evidence_id,
         ),
         record(
             "evidence", evidence_id, subject_id=engagement_id,
             evidence_type="partner_agreement", provenance="synthetic fixture",
+            authorized_scope=["referral:accessibility"],
             review_status="reviewed", execution_status="not_run",
             sha256="a" * 64, expires_at=LATER,
             reviewed_by=FACILITATOR, reviewed_at=STAMP,
@@ -198,7 +227,8 @@ def referral_records():
         ),
         record(
             "consent", "f0000000-0000-4000-8000-000000000001",
-            participant_id=PARTICIPANT, purpose="accessibility_support",
+            installation_id=installation_id, participant_id=PARTICIPANT,
+            purpose="accessibility_support",
             recipient="synthetic-provider", field_scopes=["preferred_contact_method"],
             valid_from=STAMP, expires_at=LATER, revoked_at=None,
         ),

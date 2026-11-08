@@ -7,6 +7,7 @@
     { "$ref": "#/$defs/installation" },
     { "$ref": "#/$defs/participant" },
     { "$ref": "#/$defs/membership" },
+    { "$ref": "#/$defs/actor_permission" },
     { "$ref": "#/$defs/access_preferences" },
     { "$ref": "#/$defs/consent" },
     { "$ref": "#/$defs/equipment" },
@@ -38,7 +39,7 @@
         ]
       },
       "uniqueItems": true,
-      "minItems": 1
+      "minItems": 0
     },
     "field_scopes": {
       "type": "array",
@@ -88,7 +89,7 @@
           "enum": [
             "installation", "participant", "membership", "access_preferences",
             "consent", "equipment", "installation_check", "participant_acceptance",
-            "organization", "partner_engagement", "referral", "funding_case",
+            "actor_permission", "organization", "partner_engagement", "referral", "funding_case",
             "budget_line", "payment_intent", "revenue_allocation", "evidence",
             "authorization", "audit_event", "evaluation_run_manifest"
           ]
@@ -112,6 +113,31 @@
       "allOf": [{ "$ref": "#/$defs/envelope" }],
       "unevaluatedProperties": false
     },
+    "actor_permission": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope" },
+        {
+          "type": "object",
+          "properties": {
+            "record_type": { "const": "actor_permission" },
+            "actor_id": { "$ref": "#/$defs/uuid" },
+            "actor_role": { "enum": ["finance_approver"] },
+            "action": {
+              "enum": ["reserve_payment", "mark_payment_unknown", "reconcile_payment"]
+            },
+            "target_id": { "$ref": "#/$defs/uuid" },
+            "active": { "type": "boolean" },
+            "valid_until": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+            "revoked_at": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
+          },
+          "required": [
+            "actor_id", "actor_role", "action", "target_id", "active",
+            "valid_until", "revoked_at"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
     "installation": {
       "allOf": [
         { "$ref": "#/$defs/envelope" },
@@ -122,9 +148,10 @@
             "status": {
               "enum": ["draft", "ready", "active", "stopped", "withdrawn", "closed"]
             },
+            "installation_policy_version": { "const": "matrix-installation-v0.1.0" },
             "participant_ids": {
               "type": "array", "items": { "$ref": "#/$defs/uuid" },
-              "uniqueItems": true, "minItems": 1
+              "uniqueItems": true, "minItems": 0
             },
             "plan_version_id": { "$ref": "#/$defs/uuid" },
             "equipment_manifest_version_id": { "$ref": "#/$defs/uuid" },
@@ -138,7 +165,7 @@
             "arena_score": { "type": ["integer", "null"], "minimum": 0 }
           },
           "required": [
-            "status", "participant_ids", "plan_version_id",
+            "status", "installation_policy_version", "participant_ids", "plan_version_id",
             "equipment_manifest_version_id", "required_check_types",
             "configuration_version", "stop_requested", "arena_enabled", "arena_score"
           ]
@@ -212,6 +239,7 @@
           "type": "object",
           "properties": {
             "record_type": { "const": "consent" },
+            "installation_id": { "$ref": "#/$defs/uuid" },
             "participant_id": { "$ref": "#/$defs/uuid" },
             "purpose": { "$ref": "#/$defs/consent_purpose" },
             "recipient": { "$ref": "#/$defs/recipient" },
@@ -221,7 +249,7 @@
             "revoked_at": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
           },
           "required": [
-            "participant_id", "purpose", "recipient", "field_scopes",
+            "installation_id", "participant_id", "purpose", "recipient", "field_scopes",
             "valid_from", "expires_at", "revoked_at"
           ]
         }
@@ -296,12 +324,14 @@
             "participant_id": { "$ref": "#/$defs/uuid" },
             "plan_version_id": { "$ref": "#/$defs/uuid" },
             "equipment_manifest_version_id": { "$ref": "#/$defs/uuid" },
+            "configuration_version": { "type": "string", "minLength": 1 },
             "accepted_at": { "$ref": "#/$defs/timestamp" },
             "withdrawn_at": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
           },
           "required": [
             "installation_id", "participant_id", "plan_version_id",
-            "equipment_manifest_version_id", "accepted_at", "withdrawn_at"
+            "equipment_manifest_version_id", "configuration_version",
+            "accepted_at", "withdrawn_at"
           ]
         }
       ],
@@ -319,9 +349,16 @@
             "verification_evidence_id": {
               "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
             },
+            "authorized_recipients": {
+              "type": "array", "items": { "$ref": "#/$defs/recipient" },
+              "uniqueItems": true
+            },
             "status": { "enum": ["proposed", "verified", "inactive"] }
           },
-          "required": ["name", "jurisdiction", "verification_evidence_id", "status"],
+          "required": [
+            "name", "jurisdiction", "verification_evidence_id", "authorized_recipients",
+            "status"
+          ],
           "allOf": [
             {
               "if": { "properties": { "status": { "const": "verified" } }, "required": ["status"] },
@@ -359,12 +396,22 @@
           ],
           "allOf": [
             {
+              "if": { "properties": { "status": { "const": "proposed" } }, "required": ["status"] },
+              "then": {
+                "properties": {
+                  "scope": { "maxItems": 0 },
+                  "publicity_permission": { "const": false }
+                }
+              }
+            },
+            {
               "if": { "properties": { "status": { "const": "signed" } }, "required": ["status"] },
               "then": {
                 "properties": {
                   "agreement_evidence_id": { "$ref": "#/$defs/uuid" },
                   "signer_id": { "$ref": "#/$defs/uuid" },
-                  "signer_authority_evidence_id": { "$ref": "#/$defs/uuid" }
+                  "signer_authority_evidence_id": { "$ref": "#/$defs/uuid" },
+                  "scope": { "allOf": [{ "$ref": "#/$defs/engagement_scope" }, { "minItems": 1 }] }
                 }
               }
             }
@@ -564,6 +611,7 @@
             "review_status": { "enum": ["unreviewed", "reviewed", "rejected"] },
             "execution_status": { "enum": ["not_run", "passed", "failed", "unknown"] },
             "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "authorized_scope": { "$ref": "#/$defs/engagement_scope" },
             "expires_at": { "$ref": "#/$defs/timestamp" },
             "reviewed_by": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
             "reviewed_at": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
@@ -576,6 +624,20 @@
             "execution_status", "sha256", "expires_at", "reviewed_by", "reviewed_at"
           ],
           "allOf": [
+            {
+              "if": {
+                "properties": { "evidence_type": { "const": "partner_agreement" } },
+                "required": ["evidence_type"]
+              },
+              "then": {
+                "properties": {
+                  "authorized_scope": {
+                    "allOf": [{ "$ref": "#/$defs/engagement_scope" }, { "minItems": 1 }]
+                  }
+                },
+                "required": ["authorized_scope"]
+              }
+            },
             {
               "if": {
                 "properties": { "review_status": { "const": "reviewed" } },

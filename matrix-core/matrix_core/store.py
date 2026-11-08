@@ -17,7 +17,8 @@ _AUDIT_NAMESPACE = UUID("8e5cb4af-f15c-43e8-9d10-0c1df0e8a4c4")
 
 
 def canonical_request_digest(
-    intent: Mapping[str, Any], actor_id: str, target_revision: int | None = None
+    intent: Mapping[str, Any], actor_id: str, target_revision: int | None = None,
+    actor_role: str = "finance_approver",
 ) -> str:
     """Hash the exact, normalized payment request bound by an authorization."""
     payload = {
@@ -28,6 +29,9 @@ def canonical_request_digest(
         "tenant_id": intent["tenant_id"],
         "environment": intent["environment"],
         "actor_id": actor_id,
+        "actor_role": actor_role,
+        "classification": intent["classification"],
+        "record_type": intent["record_type"],
         "funding_case_id": intent["funding_case_id"],
         "budget_line_id": intent["budget_line_id"],
         "purpose": intent["purpose"],
@@ -56,6 +60,42 @@ class ReferenceStore:
         with self._lock:
             return deepcopy(list(self._records.values()))
 
+    def _authorize_actor(
+        self, intent: Mapping[str, Any], actor: Any, action: str, now: datetime
+    ) -> tuple[str, ...]:
+        if not isinstance(actor, Mapping):
+            return ("ACTOR_CONTEXT_INVALID",)
+        actor_id, role = actor.get("id"), actor.get("role")
+        tenant_id, environment = actor.get("tenant_id"), actor.get("environment")
+        if not all(
+            isinstance(value, str) and value
+            for value in (actor_id, role, tenant_id, environment)
+        ):
+            return ("ACTOR_CONTEXT_INVALID",)
+        if tenant_id != intent.get("tenant_id"):
+            return ("TENANT_MISMATCH",)
+        if environment != intent.get("environment"):
+            return ("ENVIRONMENT_MISMATCH",)
+        if role != "finance_approver":
+            return ("ACTOR_ROLE_UNAUTHORIZED",)
+        permitted = any(
+            row.get("record_type") == "actor_permission"
+            and row.get("actor_id") == actor_id
+            and row.get("actor_role") == role
+            and row.get("action") == action
+            and row.get("target_id") == intent.get("id")
+            and row.get("tenant_id") == tenant_id
+            and row.get("environment") == environment
+            and row.get("active") is True
+            and row.get("revoked_at") is None
+            and (
+                row.get("valid_until") is None
+                or _after(row["valid_until"], now)
+            )
+            for row in self._records.values()
+        )
+        return () if permitted else ("ACTOR_PERMISSION_MISSING_REVOKED_OR_EXPIRED",)
+
     def reserve_payment(
         self,
         payment_id: str,
@@ -67,17 +107,18 @@ class ReferenceStore:
         with self._lock:
             if self._initial_errors:
                 return Decision(False, self._initial_errors), None
+            if not isinstance(payment_id, str) or not payment_id:
+                return Decision(False, ("PAYMENT_ID_INVALID",)), None
+            if type(expected_revision) is not int or expected_revision < 1:
+                return Decision(False, ("EXPECTED_REVISION_INVALID",)), None
             if not _aware(now):
                 return Decision(False, ("CLOCK_NOT_TIMEZONE_AWARE",)), None
             intent = self._records.get(payment_id)
             if not intent or intent.get("record_type") != "payment_intent":
                 return Decision(False, ("PAYMENT_NOT_FOUND",)), None
-            if actor.get("role") != "finance_approver":
-                return Decision(False, ("ACTOR_ROLE_UNAUTHORIZED",)), None
-            if actor.get("tenant_id") != intent["tenant_id"]:
-                return Decision(False, ("TENANT_MISMATCH",)), None
-            if not isinstance(actor.get("id"), str):
-                return Decision(False, ("ACTOR_ID_INVALID",)), None
+            actor_errors = self._authorize_actor(intent, actor, "reserve_payment", now)
+            if actor_errors:
+                return Decision(False, actor_errors), None
             authorization = self._records.get(intent["authorization_id"])
             matching = [
                 row for row in self._records.values()
@@ -90,14 +131,32 @@ class ReferenceStore:
             if intent["state"] in {"unknown", "reconciliation_required"}:
                 return Decision(False, ("RECONCILIATION_REQUIRED_NO_RETRY",)), None
             if intent["state"] == "reserved":
+                replay_digest = canonical_request_digest(
+                    intent, actor["id"], expected_revision, actor["role"]
+                )
                 if (
                     expected_revision + 1 == intent["revision"]
                     and authorization
+                    and authorization.get("record_type") == "authorization"
                     and authorization.get("actor_id") == actor["id"]
                     and authorization.get("actor_role") == actor["role"]
                     and authorization.get("tenant_id") == actor["tenant_id"]
+                    and authorization.get("environment") == actor["environment"]
+                    and authorization.get("target_id") == payment_id
+                    and authorization.get("target_revision") == expected_revision
+                    and authorization.get("request_digest") == replay_digest
+                    and intent.get("request_digest") == replay_digest
+                    and authorization.get("consumed_at") is not None
                 ):
                     return Decision(True, ("IDEMPOTENT_REPLAY",)), deepcopy(intent)
+                if (
+                    not authorization
+                    or authorization.get("actor_id") != actor["id"]
+                    or authorization.get("actor_role") != actor["role"]
+                    or authorization.get("request_digest") != replay_digest
+                    or intent.get("request_digest") != replay_digest
+                ):
+                    return Decision(False, ("AUTHORIZATION_INVALID_EXPIRED_OR_REPLAYED",)), None
                 if authorization and authorization.get("actor_id") != actor["id"]:
                     return Decision(False, ("AUTHORIZATION_INVALID_EXPIRED_OR_REPLAYED",)), None
                 return Decision(False, ("STALE_REVISION",)), None
@@ -130,7 +189,9 @@ class ReferenceStore:
                 "tenant_id"
             ] or budget["tenant_id"] != intent["tenant_id"]:
                 return Decision(False, ("CROSS_TENANT_REFERENCE",)), None
-            digest = canonical_request_digest(intent, actor["id"], expected_revision)
+            digest = canonical_request_digest(
+                intent, actor["id"], expected_revision, actor["role"]
+            )
             if (
                 intent["request_digest"] != digest
                 or authorization["request_digest"] != digest
@@ -197,6 +258,7 @@ class ReferenceStore:
             audit_id = _audit_id(intent["id"], "payment_reservation", intent["revision"] + 1)
             if audit_id in self._records:
                 return Decision(False, ("DUPLICATE_AUDIT_EVENT_ID",)), None
+            before = deepcopy(self._records)
             intent["state"] = "reserved"
             intent["reconciliation_evidence_id"] = None
             intent["revision"] += 1
@@ -211,6 +273,10 @@ class ReferenceStore:
                 intent, authorization, "payment_reservation", "allow",
                 ["PAYMENT_RESERVED_SANDBOX_ONLY"], now, audit_id,
             )
+            validation_errors = validate_records(self._records.values())
+            if validation_errors:
+                self._records = before
+                return Decision(False, validation_errors), None
             return Decision(True, ("PAYMENT_RESERVED_SANDBOX_ONLY",)), deepcopy(intent)
 
     def record_unknown_outcome(
@@ -226,13 +292,14 @@ class ReferenceStore:
                 return Decision(False, self._initial_errors)
             if not _aware(now):
                 return Decision(False, ("CLOCK_NOT_TIMEZONE_AWARE",))
+            if not isinstance(payment_id, str) or type(expected_revision) is not int or expected_revision < 1:
+                return Decision(False, ("PAYMENT_REQUEST_INVALID",))
             intent = self._records.get(payment_id)
             if not intent or intent.get("record_type") != "payment_intent":
                 return Decision(False, ("PAYMENT_NOT_FOUND",))
-            if actor.get("role") != "finance_approver" or not isinstance(actor.get("id"), str):
-                return Decision(False, ("ACTOR_ROLE_UNAUTHORIZED",))
-            if actor.get("tenant_id") != intent["tenant_id"]:
-                return Decision(False, ("TENANT_MISMATCH",))
+            actor_errors = self._authorize_actor(intent, actor, "mark_payment_unknown", now)
+            if actor_errors:
+                return Decision(False, actor_errors)
             authorization = self._records.get(intent["authorization_id"], {})
             if (
                 authorization.get("actor_id") != actor["id"]
@@ -248,6 +315,7 @@ class ReferenceStore:
             )
             if audit_id in self._records:
                 return Decision(False, ("DUPLICATE_AUDIT_EVENT_ID",))
+            before = deepcopy(self._records)
             intent["state"] = "reconciliation_required"
             intent["revision"] += 1
             intent["updated_at"] = _timestamp(now)
@@ -255,6 +323,10 @@ class ReferenceStore:
                 intent, authorization, "payment_outcome_unknown", "deny",
                 ["RECONCILIATION_REQUIRED_NO_RETRY"], now, audit_id,
             )
+            validation_errors = validate_records(self._records.values())
+            if validation_errors:
+                self._records = before
+                return Decision(False, validation_errors)
             return Decision(True, ("OUTCOME_MARKED_RECONCILIATION_REQUIRED",))
 
     def record_settled(
@@ -271,13 +343,14 @@ class ReferenceStore:
                 return Decision(False, self._initial_errors)
             if not _aware(now):
                 return Decision(False, ("CLOCK_NOT_TIMEZONE_AWARE",))
+            if not isinstance(payment_id, str) or type(expected_revision) is not int or expected_revision < 1:
+                return Decision(False, ("PAYMENT_REQUEST_INVALID",))
             intent = self._records.get(payment_id)
             if not intent or intent.get("record_type") != "payment_intent":
                 return Decision(False, ("PAYMENT_NOT_FOUND",))
-            if actor.get("role") != "finance_approver" or not isinstance(actor.get("id"), str):
-                return Decision(False, ("ACTOR_ROLE_UNAUTHORIZED",))
-            if actor.get("tenant_id") != intent["tenant_id"]:
-                return Decision(False, ("TENANT_MISMATCH",))
+            actor_errors = self._authorize_actor(intent, actor, "reconcile_payment", now)
+            if actor_errors:
+                return Decision(False, actor_errors)
             authorization = self._records.get(intent["authorization_id"], {})
             if (
                 authorization.get("actor_id") != actor["id"]
@@ -288,6 +361,8 @@ class ReferenceStore:
                 return Decision(False, ("STALE_REVISION",))
             if intent["state"] not in {"reserved", "reconciliation_required"}:
                 return Decision(False, ("INVALID_PAYMENT_TRANSITION",))
+            if not isinstance(reconciliation_evidence, Mapping):
+                return Decision(False, ("PAYMENT_RECONCILIATION_EVIDENCE_INVALID",))
             evidence = deepcopy(dict(reconciliation_evidence))
             candidate_records = [*self._records.values(), evidence]
             validation_errors = validate_records(candidate_records)
@@ -320,6 +395,7 @@ class ReferenceStore:
             amount = intent["money"]["amount_minor"]
             if budget["reserved_minor"] < amount:
                 return Decision(False, ("BUDGET_ACCOUNTING_INVALID",))
+            before = deepcopy(self._records)
             budget["reserved_minor"] -= amount
             budget["settled_minor"] += amount
             budget["revision"] += 1
@@ -333,6 +409,10 @@ class ReferenceStore:
                 intent, authorization, "payment_outcome_reconciled", "allow",
                 ["KNOWN_OUTCOME_RECONCILED"], now, audit_id,
             )
+            validation_errors = validate_records(self._records.values())
+            if validation_errors:
+                self._records = before
+                return Decision(False, validation_errors)
             return Decision(True, ("KNOWN_OUTCOME_RECONCILED",))
 
     def _append_audit(
@@ -379,7 +459,11 @@ def _timestamp(value: datetime) -> str:
 
 
 def _aware(value: datetime) -> bool:
-    return value.tzinfo is not None and value.utcoffset() is not None
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() is not None
+    )
 
 
 def _usable_evidence(

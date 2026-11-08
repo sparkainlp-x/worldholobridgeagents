@@ -100,6 +100,33 @@ class ActivationPolicyTests(unittest.TestCase):
             self.decide(records).reason_codes,
         )
 
+    def test_rejected_or_conflicting_current_checks_and_equipment_deny(self):
+        records = activation_records()
+        check = next(
+            row for row in records
+            if row.get("record_type") == "installation_check"
+            and row.get("check_type") == "physical_safety"
+        )
+        conflicting = {
+            **check, "id": "64000000-0000-4000-8000-000000000001",
+            "status": "failed",
+        }
+        records.append(conflicting)
+        self.assertIn(
+            "REQUIRED_CHECK_MISSING_STALE_OR_UNREVIEWED",
+            self.decide(records).reason_codes,
+        )
+        records = activation_records()
+        equipment = next(row for row in records if row.get("record_type") == "equipment")
+        records.append({
+            **equipment, "id": "65000000-0000-4000-8000-000000000001",
+            "review_status": "rejected",
+        })
+        self.assertIn(
+            "EQUIPMENT_MANIFEST_UNREVIEWED_OR_STALE",
+            self.decide(records).reason_codes,
+        )
+
     def test_plan_or_equipment_change_invalidates_acceptance(self):
         for field in ("plan_version_id", "equipment_manifest_version_id"):
             records = activation_records()
@@ -170,6 +197,10 @@ class ReferralPolicyTests(unittest.TestCase):
     def test_referral_must_fit_the_signed_engagement_scope(self):
         engagement = next(row for row in self.records if row["record_type"] == "partner_engagement")
         engagement["scope"] = ["equipment_provision"]
+        self.assertIn("PARTNER_AGREEMENT_SCOPE_MISMATCH", self.decide().reason_codes)
+        next(row for row in self.records if row.get("evidence_type") == "partner_agreement")[
+            "authorized_scope"
+        ] = ["equipment_provision"]
         self.assertIn("PARTNER_SCOPE_INSUFFICIENT", self.decide().reason_codes)
 
     def test_signer_authority_and_agreement_review_must_be_current(self):
@@ -195,10 +226,18 @@ class ReferralPolicyTests(unittest.TestCase):
             if row.get("evidence_type") == "signer_authority"
         )
         authority["authorized_signer_id"] = "41000000-0000-4000-8000-000000000001"
-        self.assertIn("PARTNER_AGREEMENT_NOT_VERIFIED", self.decide().reason_codes)
+        self.assertIn("SIGNER_AUTHORITY_EVIDENCE_MISMATCH", self.decide().reason_codes)
 
     def test_proposed_engagement_does_not_authorize_referral(self):
-        next(row for row in self.records if row["record_type"] == "partner_engagement")["status"] = "proposed"
+        engagement = next(row for row in self.records if row["record_type"] == "partner_engagement")
+        engagement.update(
+            status="proposed", scope=[], agreement_evidence_id=None, signer_id=None,
+            signer_authority_evidence_id=None,
+        )
+        self.records = [
+            row for row in self.records
+            if row.get("evidence_type") not in {"partner_agreement", "signer_authority"}
+        ]
         self.assertIn("PARTNER_AGREEMENT_NOT_VERIFIED", self.decide().reason_codes)
 
     def test_inactive_participant_cannot_be_referred(self):
@@ -324,6 +363,29 @@ class StopAndWithdrawalTests(unittest.TestCase):
             for row in stopped
         ))
 
+    def test_stop_ignores_unrelated_invalid_records_and_is_idempotent(self):
+        records = activation_records()
+        records.append({"record_type": "not-a-record", "id": "invalid"})
+        decision, stopped = request_installation_stop(
+            records, INSTALLATION,
+            {"id": PARTICIPANT, "tenant_id": TENANT, "role": "participant"},
+            NOW, "d3100000-0000-4000-8000-000000000001",
+        )
+        self.assertTrue(decision.allowed)
+        self.assertIn({"record_type": "not-a-record", "id": "invalid"}, stopped)
+        audit_count = sum(row.get("record_type") == "audit_event" for row in stopped if hasattr(row, "get"))
+        repeated, unchanged = request_installation_stop(
+            stopped, INSTALLATION,
+            {"id": PARTICIPANT, "tenant_id": TENANT, "role": "participant"},
+            NOW, "d3200000-0000-4000-8000-000000000001",
+        )
+        self.assertTrue(repeated.allowed)
+        self.assertIn("STOP_ALREADY_ACTIVE", repeated.reason_codes)
+        self.assertEqual(
+            sum(row.get("record_type") == "audit_event" for row in unchanged if hasattr(row, "get")),
+            audit_count,
+        )
+
     def test_audit_event_ids_cannot_be_replayed_for_a_second_transition(self):
         activated, active = activate_installation(
             activation_records(), INSTALLATION, actor(), NOW, expected_revision=1,
@@ -354,6 +416,12 @@ class StopAndWithdrawalTests(unittest.TestCase):
         records.extend([
             {**participant, "id": second},
             {
+                **next(row for row in records if row.get("record_type") == "membership"
+                       and row.get("role") == "participant"),
+                "id": "46000000-0000-4000-8000-000000000001",
+                "participant_id": second,
+            },
+            {
                 **consent, "id": "53000000-0000-4000-8000-000000000001",
                 "participant_id": second,
             },
@@ -377,6 +445,53 @@ class StopAndWithdrawalTests(unittest.TestCase):
             for row in updated
         ))
 
+    def test_withdrawal_without_acceptance_revokes_only_installation_scope(self):
+        second_installation = "29000000-0000-4000-8000-000000000001"
+        records = activation_records()
+        installation = next(row for row in records if row["record_type"] == "installation")
+        other_installation = {
+            **installation, "id": second_installation,
+            "participant_ids": [PARTICIPANT], "status": "draft", "revision": 1,
+        }
+        records.append(other_installation)
+        membership = next(
+            row for row in records
+            if row.get("record_type") == "membership" and row.get("role") == "participant"
+        )
+        other_membership = {
+            **membership, "id": "47000000-0000-4000-8000-000000000001",
+            "installation_id": second_installation, "active": True,
+        }
+        records.append(other_membership)
+        consent = next(row for row in records if row.get("record_type") == "consent")
+        other_consent = {
+            **consent, "id": "48000000-0000-4000-8000-000000000001",
+            "installation_id": second_installation, "revoked_at": None,
+        }
+        records.append(other_consent)
+        records = [
+            row for row in records
+            if row.get("record_type") != "participant_acceptance"
+        ]
+        decision, updated = withdraw_participant(
+            records, INSTALLATION, PARTICIPANT,
+            {"id": PARTICIPANT, "tenant_id": TENANT, "role": "participant"},
+            NOW, "d8000000-0000-4000-8000-000000000001",
+        )
+        self.assertTrue(decision.allowed)
+        rows = {row["id"]: row for row in updated if isinstance(row, dict)}
+        self.assertFalse(rows[membership["id"]]["active"])
+        self.assertTrue(rows[other_membership["id"]]["active"])
+        self.assertIsNotNone(rows[consent["id"]]["revoked_at"])
+        self.assertIsNone(rows[other_consent["id"]]["revoked_at"])
+        repeated, _ = withdraw_participant(
+            updated, INSTALLATION, PARTICIPANT,
+            {"id": PARTICIPANT, "tenant_id": TENANT, "role": "participant"},
+            NOW, "d8100000-0000-4000-8000-000000000001",
+        )
+        self.assertTrue(repeated.allowed)
+        self.assertIn("PARTICIPANT_ALREADY_WITHDRAWN", repeated.reason_codes)
+
     def test_final_participant_withdrawal_stops_without_auto_resume(self):
         decision, updated = withdraw_participant(
             activation_records(), INSTALLATION, PARTICIPANT,
@@ -390,7 +505,8 @@ class StopAndWithdrawalTests(unittest.TestCase):
         resumed, unchanged = request_installation_stop(
             updated, INSTALLATION, actor(), NOW, "d6000000-0000-4000-8000-000000000001"
         )
-        self.assertFalse(resumed.allowed)
+        self.assertTrue(resumed.allowed)
+        self.assertIn("STOP_ALREADY_ACTIVE", resumed.reason_codes)
         self.assertEqual(unchanged, updated)
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -16,6 +17,8 @@ SCHEMA_PATH = (
     Path(__file__).parents[1] / "schemas" / "v0.1.0" / "core.schema.json"
 )
 PRIVILEGED_ROLES = {"facilitator", "tenant_admin"}
+INSTALLATION_POLICY_VERSION = "matrix-installation-v0.1.0"
+REQUIRED_INSTALLATION_CHECKS = {"accessibility", "physical_safety"}
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,15 @@ def validate_records(records: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
     }
     natural_keys: set[tuple[Any, ...]] = set()
     for record in safe_records:
+        if (
+            record.get("record_type") == "installation"
+            and (
+                record.get("installation_policy_version") != INSTALLATION_POLICY_VERSION
+                or set(record.get("required_check_types", []))
+                != REQUIRED_INSTALLATION_CHECKS
+            )
+        ):
+            errors.append("TRUSTED_INSTALLATION_POLICY_MISMATCH")
         for field in (
             "participant_id", "installation_id", "organization_id",
             "partner_engagement_id", "funding_case_id", "budget_line_id",
@@ -85,7 +97,14 @@ def validate_records(records: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
                 (record.get("participant_id"), "participant"),
             ],
             "access_preferences": [(record.get("participant_id"), "participant")],
-            "consent": [(record.get("participant_id"), "participant")],
+            "consent": [
+                (record.get("participant_id"), "participant"),
+                (record.get("installation_id"), "installation"),
+            ],
+            "actor_permission": [
+                (record.get("actor_id"), "participant"),
+                (record.get("target_id"), "payment_intent"),
+            ],
             "equipment": [(record.get("installation_id"), "installation")],
             "installation_check": [(record.get("installation_id"), "installation")],
             "participant_acceptance": [
@@ -158,8 +177,14 @@ def validate_records(records: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
                     authority.get("tenant_id") != record.get("tenant_id")
                     or authority.get("subject_id") != record.get("organization_id")
                     or authority.get("evidence_type") != "signer_authority"
+                    or authority.get("authorized_signer_id") != record.get("signer_id")
                 ):
                     errors.append("SIGNER_AUTHORITY_EVIDENCE_MISMATCH")
+            agreement_id = record.get("agreement_evidence_id")
+            if agreement_id:
+                agreement = by_id.get(agreement_id)
+                if agreement and agreement.get("authorized_scope") != record.get("scope"):
+                    errors.append("PARTNER_AGREEMENT_SCOPE_MISMATCH")
         if record.get("record_type") == "payment_intent":
             evidence_id = record.get("reconciliation_evidence_id")
             if evidence_id:
@@ -263,6 +288,8 @@ def decide_activation(
     """Evaluate activation against current records and the caller-provided clock."""
     if not _aware(now):
         return _decision(["CLOCK_NOT_TIMEZONE_AWARE"])
+    if not isinstance(installation_id, str) or not isinstance(actor, Mapping):
+        return _decision(["ACTIVATION_REQUEST_INVALID"])
     records = list(records)
     validation_errors = list(validate_records(records))
     if validation_errors:
@@ -290,6 +317,14 @@ def decide_activation(
         reasons.append("ACTOR_ROLE_UNAUTHORIZED")
     if installation["status"] not in {"draft", "ready"}:
         reasons.append("INVALID_INSTALLATION_STATE")
+    if not installation.get("participant_ids"):
+        reasons.append("PARTICIPANTS_REQUIRED")
+    if (
+        installation.get("installation_policy_version") != INSTALLATION_POLICY_VERSION
+        or set(installation.get("required_check_types", []))
+        != REQUIRED_INSTALLATION_CHECKS
+    ):
+        reasons.append("TRUSTED_INSTALLATION_POLICY_MISMATCH")
     if installation["stop_requested"] or installation["status"] == "stopped":
         reasons.append("STOP_CONTROL_ACTIVE")
     if any(
@@ -315,11 +350,23 @@ def decide_activation(
         ):
             reasons.append("PARTICIPANT_UNAVAILABLE")
             continue
+        if not any(
+            row.get("record_type") == "membership"
+            and row.get("installation_id") == installation_id
+            and row.get("participant_id") == participant_id
+            and row.get("tenant_id") == tenant_id
+            and row.get("role") == "participant"
+            and row.get("active") is True
+            and (row.get("valid_until") is None or _after(row["valid_until"], now))
+            for row in records
+        ):
+            reasons.append("PARTICIPANT_MEMBERSHIP_MISSING_OR_INACTIVE")
         consents = [
             row for row in records
             if row.get("record_type") == "consent"
             and row.get("participant_id") == participant_id
             and row.get("tenant_id") == tenant_id
+            and row.get("installation_id") == installation_id
             and row.get("purpose") == "installation_activation"
             and row.get("recipient") == "matrix-core"
             and "installation_status" in row.get("field_scopes", [])
@@ -338,11 +385,20 @@ def decide_activation(
             and row.get("plan_version_id") == installation["plan_version_id"]
             and row.get("equipment_manifest_version_id")
             == installation["equipment_manifest_version_id"]
+            and row.get("configuration_version") == installation["configuration_version"]
             and row.get("withdrawn_at") is None
             and _at_or_before(row.get("accepted_at"), now)
         ]
         if not acceptances:
             reasons.append("CURRENT_ACCEPTANCE_MISSING")
+    equipment_candidates = [
+        row for row in records
+        if row.get("record_type") == "equipment"
+        and row.get("installation_id") == installation_id
+        and row.get("tenant_id") == tenant_id
+        and row.get("manifest_version_id")
+        == installation["equipment_manifest_version_id"]
+    ]
     equipment = [
         row for row in records
         if row.get("record_type") == "equipment"
@@ -351,6 +407,10 @@ def decide_activation(
         and row.get("manifest_version_id")
         == installation["equipment_manifest_version_id"]
         and row.get("review_status") == "reviewed"
+        and all(
+            item.get("configuration_version") == installation["configuration_version"]
+            for item in row.get("items", [])
+        )
         and _after(row.get("expires_at"), now)
         and _at_or_before(row.get("reviewed_at"), now)
         and any(
@@ -368,9 +428,18 @@ def decide_activation(
             for membership in records
         )
     ]
-    if not equipment:
+    if len(equipment) != 1 or len(equipment_candidates) != 1:
         reasons.append("EQUIPMENT_MANIFEST_UNREVIEWED_OR_STALE")
     for check_type in installation["required_check_types"]:
+        check_candidates = [
+            row for row in records
+            if row.get("record_type") == "installation_check"
+            and row.get("installation_id") == installation_id
+            and row.get("tenant_id") == tenant_id
+            and row.get("check_type") == check_type
+            and row.get("configuration_version") == installation["configuration_version"]
+            and _after(row.get("expires_at"), now)
+        ]
         checks = [
             row for row in records
             if row.get("record_type") == "installation_check"
@@ -396,7 +465,7 @@ def decide_activation(
             and _at_or_before(row.get("completed_at"), now)
             and _after(row.get("expires_at"), now)
         ]
-        if not checks:
+        if len(checks) != 1 or len(check_candidates) != 1:
             reasons.append("REQUIRED_CHECK_MISSING_STALE_OR_UNREVIEWED")
     return _decision(reasons)
 
@@ -411,6 +480,12 @@ def decide_referral(
     """Check referral enablement separately from publicity permission."""
     if not _aware(now):
         return _decision(["CLOCK_NOT_TIMEZONE_AWARE"])
+    if (
+        not isinstance(referral_id, str)
+        or not isinstance(actor, Mapping)
+        or not isinstance(known_jurisdictions, set)
+    ):
+        return _decision(["REFERRAL_REQUEST_INVALID"])
     records = list(records)
     errors = list(validate_records(records))
     if errors:
@@ -489,6 +564,16 @@ def decide_referral(
         or not participant
         or participant.get("tenant_id") != tenant_id
         or participant.get("status") != "active"
+        or not any(
+            row.get("record_type") == "membership"
+            and row.get("installation_id") == referral["installation_id"]
+            and row.get("participant_id") == referral["participant_id"]
+            and row.get("tenant_id") == tenant_id
+            and row.get("role") == "participant"
+            and row.get("active") is True
+            and (row.get("valid_until") is None or _after(row["valid_until"], now))
+            for row in records
+        )
     ):
         reasons.append("INSTALLATION_OR_PARTICIPANT_NOT_ACTIVE")
     required_scope = {
@@ -523,16 +608,20 @@ def decide_referral(
         or not _at_or_before(signer_authority.get("reviewed_at"), now)
         or signer_authority.get("reviewed_by") not in authorized_reviewers
         or not engagement.get("signer_id")
+        or agreement.get("authorized_scope") != engagement.get("scope")
     ):
         reasons.append("PARTNER_AGREEMENT_NOT_VERIFIED")
     if referral["status"] != "enabled":
         reasons.append("REFERRAL_NOT_ENABLED")
     consent_ok = any(
         row.get("record_type") == "consent"
+        and row.get("installation_id") == referral["installation_id"]
         and row.get("tenant_id") == tenant_id
         and row.get("participant_id") == referral["participant_id"]
         and row.get("purpose") == referral["purpose"]
         and row.get("recipient") == referral["recipient"]
+        and organization is not None
+        and referral["recipient"] in organization.get("authorized_recipients", [])
         and set(referral["field_scopes"]).issubset(set(row.get("field_scopes", [])))
         and row.get("revoked_at") is None
         and _at_or_before(row.get("valid_from"), now)
@@ -614,41 +703,62 @@ def request_installation_stop(
     now: datetime,
     audit_event_id: str,
 ) -> tuple[Decision, list[dict[str, Any]]]:
-    """Apply an immediate, irreversible stop without consulting financial state."""
-    records = [dict(record) for record in records]
+    """Record a reference stop without claiming to physically stop a device."""
+    records = [
+        dict(record) if isinstance(record, Mapping) else record for record in records
+    ]
     if not _aware(now):
         return _decision(["CLOCK_NOT_TIMEZONE_AWARE"]), records
-    errors = list(validate_records(records))
-    if errors:
-        return _decision(errors), records
-    by_id = {record["id"]: record for record in records}
-    installation = by_id.get(installation_id)
-    if not installation or installation.get("record_type") != "installation":
+    if not isinstance(installation_id, str) or not isinstance(actor, Mapping):
+        return _decision(["STOP_REQUEST_INVALID"]), records
+    targets = [
+        record for record in records
+        if isinstance(record, Mapping) and record.get("id") == installation_id
+    ]
+    if len(targets) != 1 or targets[0].get("record_type") != "installation":
         return _decision(["INSTALLATION_NOT_FOUND"]), records
+    installation = targets[0]
+    schema_errors = [
+        error for error in _validator().iter_errors(installation)
+    ]
+    if schema_errors:
+        return _decision(["STOP_TARGET_INVALID"]), records
     if actor.get("tenant_id") != installation["tenant_id"]:
         return _decision(["TENANT_MISMATCH"]), records
-    is_participant = actor.get("id") in installation["participant_ids"]
+    if (
+        not isinstance(actor.get("id"), str)
+        or actor.get("environment", installation["environment"])
+        != installation["environment"]
+    ):
+        return _decision(["STOP_ACTOR_CONTEXT_INVALID"]), records
+    is_participant = actor["id"] in installation["participant_ids"]
     is_operator = any(
-        row.get("record_type") == "membership"
+        isinstance(row, Mapping)
+        and row.get("record_type") == "membership"
         and row.get("installation_id") == installation_id
         and row.get("participant_id") == actor.get("id")
         and row.get("tenant_id") == installation["tenant_id"]
+        and row.get("environment") == installation["environment"]
         and row.get("active") is True
         and row.get("role") in PRIVILEGED_ROLES | {"safety_reviewer"}
         and row.get("role") == actor.get("role")
+        and (row.get("valid_until") is None or _after(row["valid_until"], now))
         for row in records
     )
     if not is_participant and not is_operator:
         return _decision(["ACTOR_ROLE_UNAUTHORIZED"]), records
     if installation["status"] in {"stopped", "withdrawn", "closed"}:
-        return _decision(["STOP_ALREADY_ACTIVE"]), records
+        return Decision(True, ("STOP_ALREADY_ACTIVE",)), records
+    if any(
+        isinstance(row, Mapping) and row.get("id") == audit_event_id for row in records
+    ):
+        return _decision(["DUPLICATE_RECORD_ID"]), records
     at = _timestamp(now)
     event = _audit_event(
         installation, audit_event_id, actor, "installation_stop", "stop", at
     )
-    event_errors = validate_records([*records, event])
-    if event_errors:
-        return _decision(list(event_errors)), records
+    if list(_validator().iter_errors(event)):
+        return _decision(["STOP_AUDIT_EVENT_INVALID"]), records
     installation["status"] = "stopped"
     installation["stop_requested"] = True
     installation["revision"] += 1
@@ -714,21 +824,21 @@ def withdraw_participant(
         return _decision(["INVALID_INSTALLATION_STATE"]), records
     if actor.get("tenant_id") != installation["tenant_id"]:
         return _decision(["TENANT_MISMATCH"]), records
-    if actor.get("id") != participant_id or participant_id not in installation["participant_ids"]:
+    if actor.get("id") != participant_id:
         return _decision(["PARTICIPANT_WITHDRAWAL_UNAUTHORIZED"]), records
-    acceptance = next(
-        (
-            row for row in records
-            if row.get("record_type") == "participant_acceptance"
-            and row.get("installation_id") == installation_id
-            and row.get("participant_id") == participant_id
-            and row.get("tenant_id") == installation["tenant_id"]
-            and row.get("withdrawn_at") is None
-        ),
-        None,
-    )
-    if acceptance is None:
-        return _decision(["CURRENT_ACCEPTANCE_MISSING"]), records
+    if participant_id not in installation["participant_ids"]:
+        return Decision(True, ("PARTICIPANT_ALREADY_WITHDRAWN",)), records
+    original_records = deepcopy(records)
+    acceptances = [
+        row for row in records
+        if row.get("record_type") == "participant_acceptance"
+        and row.get("installation_id") == installation_id
+        and row.get("participant_id") == participant_id
+        and row.get("tenant_id") == installation["tenant_id"]
+        and row.get("withdrawn_at") is None
+    ]
+    if any(row.get("id") == audit_event_id for row in records):
+        return _decision(["DUPLICATE_RECORD_ID"]), records
     at = _timestamp(now)
     event = _audit_event(
         installation, audit_event_id, actor, "participant_withdrawal", "withdraw", at
@@ -736,18 +846,49 @@ def withdraw_participant(
     event_errors = validate_records([*records, event])
     if event_errors:
         return _decision(list(event_errors)), records
-    acceptance["withdrawn_at"] = at
-    acceptance["revision"] += 1
-    acceptance["updated_at"] = at
+    for acceptance in acceptances:
+        acceptance["withdrawn_at"] = at
+        acceptance["revision"] += 1
+        acceptance["updated_at"] = at
+    for row in records:
+        if (
+            row.get("record_type") == "membership"
+            and row.get("installation_id") == installation_id
+            and row.get("participant_id") == participant_id
+            and row.get("active") is True
+        ):
+            row["active"] = False
+            row["revision"] += 1
+            row["updated_at"] = at
+        elif (
+            row.get("record_type") == "consent"
+            and row.get("installation_id") == installation_id
+            and row.get("participant_id") == participant_id
+            and row.get("revoked_at") is None
+        ):
+            row["revoked_at"] = at
+            row["revision"] += 1
+            row["updated_at"] = at
+        elif (
+            row.get("record_type") == "referral"
+            and row.get("installation_id") == installation_id
+            and row.get("participant_id") == participant_id
+            and row.get("status") != "revoked"
+        ):
+            row["status"] = "revoked"
+            row["revision"] += 1
+            row["updated_at"] = at
     remaining = [item for item in installation["participant_ids"] if item != participant_id]
-    if remaining:
-        installation["participant_ids"] = remaining
-    else:
+    installation["participant_ids"] = remaining
+    if not remaining:
         installation["status"] = "stopped"
         installation["stop_requested"] = True
     installation["revision"] += 1
     installation["updated_at"] = at
     records.append(event)
+    validation_errors = validate_records(records)
+    if validation_errors:
+        return _decision(list(validation_errors)), original_records
     return _decision([]), records
 
 

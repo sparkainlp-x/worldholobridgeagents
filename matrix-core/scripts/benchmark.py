@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
 import importlib.metadata
@@ -23,7 +24,7 @@ from uuid import UUID, uuid5
 from jsonschema import Draft202012Validator, FormatChecker
 
 from matrix_core.policy import decide_activation
-from matrix_core.synthetic import NOW, SCENARIO_CLASSES, build_activation_case
+from matrix_core.synthetic import LATER, NOW, SCENARIO_CLASSES, STAMP, build_activation_case
 
 
 ROOT = Path(__file__).parents[1]
@@ -202,16 +203,6 @@ def weak_boolean_baseline(case: dict[str, Any]) -> tuple[bool, str]:
     return allowed, "WEAK_BOOLEAN_GATE_ALLOW" if allowed else "WEAK_BOOLEAN_GATE_DENY"
 
 
-def _wilson(successes: int, total: int, z: float = 1.96) -> dict[str, float] | None:
-    if not total:
-        return None
-    proportion = successes / total
-    denominator = 1 + z * z / total
-    center = (proportion + z * z / (2 * total)) / denominator
-    margin = z * ((proportion * (1 - proportion) / total + z * z / (4 * total**2)) ** 0.5) / denominator
-    return {"lower_95": max(0.0, center - margin), "upper_95": min(1.0, center + margin)}
-
-
 def _latency(values: list[int]) -> dict[str, float]:
     return {
         "median_ns": statistics.median(values) if values else 0,
@@ -220,7 +211,9 @@ def _latency(values: list[int]) -> dict[str, float]:
 
 
 def _metrics(
-    rows: list[dict[str, Any]], decision_field: str
+    rows: list[dict[str, Any]], decision_field: str,
+    reason_field: str = "strict_reason_codes",
+    latency_field: str = "strict_latency_ns",
 ) -> dict[str, Any]:
     false_allows = sum(
         not row["oracle_allowed"] and row[decision_field] for row in rows
@@ -230,14 +223,12 @@ def _metrics(
     )
     oracle_denied = sum(not row["oracle_allowed"] for row in rows)
     oracle_allowed = sum(row["oracle_allowed"] for row in rows)
-    strict = decision_field == "strict_allowed"
     return {
         "scenario_count": len(rows),
         "oracle_allowed_denominator": oracle_allowed,
         "oracle_denied_denominator": oracle_denied,
         "false_allows": false_allows,
         "false_allow_rate": false_allows / oracle_denied if oracle_denied else None,
-        "false_allow_wilson_95": _wilson(false_allows, oracle_denied),
         "false_denials": false_denials,
         "false_denial_rate": false_denials / oracle_allowed if oracle_allowed else None,
         "valid_action_completion": (
@@ -245,20 +236,112 @@ def _metrics(
         ),
         "reason_codes_observed": sorted({
             reason for row in rows if not row[decision_field]
-            for reason in (
-                row.get("strict_reason_codes", [])
-                if strict else [row["weak_baseline_reason"]]
-            )
+            for reason in row.get(reason_field, [])
+            if isinstance(row.get(reason_field), list)
         }),
-        "latency": _latency([
-            row["strict_latency_ns"] if strict else row["baseline_latency_ns"]
-            for row in rows
-        ]),
+        "latency": _latency([row[latency_field] for row in rows]),
+        "uncertainty": (
+            "No inferential interval: scenarios are deterministically generated and "
+            "stratified by policy class, not sampled from a deployment or human population."
+        ),
     }
 
 
+def _ablation_input(case: dict[str, Any], gate: str) -> dict[str, Any]:
+    altered = deepcopy(case)
+    records = altered["records"]
+    installation = next(
+        row for row in records if row.get("id") == altered["installation_id"]
+    )
+    reviewer_id = next(
+        row["participant_id"] for row in records
+        if row.get("record_type") == "membership"
+        and row.get("role") in {"safety_reviewer", "tenant_admin"}
+        and row.get("active") is True
+    )
+    if gate == "consent":
+        records[:] = [row for row in records if row.get("record_type") != "consent"]
+        for index, participant_id in enumerate(installation["participant_ids"]):
+            records.append({
+                **{key: installation[key] for key in (
+                    "schema_version", "tenant_id", "environment", "classification"
+                )},
+                "record_type": "consent",
+                "id": str(uuid5(_NAMESPACE, f"{case['case_id']}:ablation-consent:{index}")),
+                "revision": 1,
+                "created_at": STAMP,
+                "updated_at": STAMP,
+                "installation_id": installation["id"],
+                "participant_id": participant_id,
+                "purpose": "installation_activation",
+                "recipient": "matrix-core",
+                "field_scopes": ["installation_status"],
+                "valid_from": STAMP,
+                "expires_at": LATER,
+                "revoked_at": None,
+            })
+    elif gate == "acceptance":
+        records[:] = [
+            row for row in records if row.get("record_type") != "participant_acceptance"
+        ]
+        for index, participant_id in enumerate(installation["participant_ids"]):
+            records.append({
+                **{key: installation[key] for key in (
+                    "schema_version", "tenant_id", "environment", "classification"
+                )},
+                "record_type": "participant_acceptance",
+                "id": str(uuid5(_NAMESPACE, f"{case['case_id']}:ablation-acceptance:{index}")),
+                "revision": 1,
+                "created_at": STAMP,
+                "updated_at": STAMP,
+                "installation_id": installation["id"],
+                "participant_id": participant_id,
+                "plan_version_id": installation["plan_version_id"],
+                "equipment_manifest_version_id": installation["equipment_manifest_version_id"],
+                "configuration_version": installation["configuration_version"],
+                "accepted_at": STAMP,
+                "withdrawn_at": None,
+            })
+    elif gate == "checks":
+        records[:] = [
+            row for row in records
+            if row.get("record_type") != "installation_check"
+        ]
+        for index, check_type in enumerate(installation["required_check_types"]):
+            records.append({
+                **{key: installation[key] for key in (
+                    "schema_version", "tenant_id", "environment", "classification"
+                )},
+                "record_type": "installation_check",
+                "id": str(uuid5(_NAMESPACE, f"{case['case_id']}:ablation-check:{index}")),
+                "revision": 1,
+                "created_at": STAMP,
+                "updated_at": STAMP,
+                "installation_id": installation["id"],
+                "check_type": check_type,
+                "status": "passed",
+                "configuration_version": installation["configuration_version"],
+                "reviewed_by": reviewer_id,
+                "completed_at": STAMP,
+                "expires_at": LATER,
+            })
+    else:
+        raise ValueError(f"unknown ablation gate: {gate}")
+    return altered
+
+
+def _run_ablation(case: dict[str, Any], gate: str) -> tuple[bool, list[str], int]:
+    altered = _ablation_input(case, gate)
+    started = time.perf_counter_ns()
+    decision = decide_activation(
+        altered["records"], altered["installation_id"],
+        altered["actor"], altered["now"],
+    )
+    return decision.allowed, list(decision.reason_codes), time.perf_counter_ns() - started
+
+
 def run_benchmark(
-    seed: int = 17, held_out_seed: int = 2026, count: int = 120
+    seed: int = 17, held_out_seed: int = 918273, count: int = 120
 ) -> dict[str, Any]:
     if seed == held_out_seed:
         raise ValueError("development and held-out seeds must differ")
@@ -284,6 +367,10 @@ def run_benchmark(
                 case["records"], case["installation_id"], case["actor"], case["now"]
             )
             strict_latency = time.perf_counter_ns() - started
+            ablations = {
+                gate: _run_ablation(case, gate)
+                for gate in ("consent", "acceptance", "checks")
+            }
             started = time.perf_counter_ns()
             baseline_allowed, baseline_reason = weak_boolean_baseline(case)
             baseline_latency = time.perf_counter_ns() - started
@@ -304,27 +391,42 @@ def run_benchmark(
                 "strict_reason_codes": list(strict.reason_codes),
                 "weak_baseline_allowed": baseline_allowed,
                 "weak_baseline_reason": baseline_reason,
+                "weak_baseline_reason_codes": [baseline_reason],
                 "strict_latency_ns": strict_latency,
                 "baseline_latency_ns": baseline_latency,
+                "ablation_no_consent_allowed": ablations["consent"][0],
+                "ablation_no_consent_reason_codes": ablations["consent"][1],
+                "ablation_no_consent_latency_ns": ablations["consent"][2],
+                "ablation_no_acceptance_allowed": ablations["acceptance"][0],
+                "ablation_no_acceptance_reason_codes": ablations["acceptance"][1],
+                "ablation_no_acceptance_latency_ns": ablations["acceptance"][2],
+                "ablation_no_checks_allowed": ablations["checks"][0],
+                "ablation_no_checks_reason_codes": ablations["checks"][1],
+                "ablation_no_checks_latency_ns": ablations["checks"][2],
                 "records": case["records"],
             }
             outcomes.append(result)
             class_results[scenario_class].append(result)
     summary: dict[str, Any] = {}
-    for label, decision_field in (
-        ("strict", "strict_allowed"), ("weak_boolean_baseline", "weak_baseline_allowed")
-    ):
-        summary[label] = _metrics(outcomes, decision_field)
+    metrics_fields = (
+        ("strict", "strict_allowed", "strict_reason_codes", "strict_latency_ns"),
+        ("weak_boolean_baseline", "weak_baseline_allowed", "weak_baseline_reason_codes", "baseline_latency_ns"),
+        ("ablation_no_consent", "ablation_no_consent_allowed", "ablation_no_consent_reason_codes", "ablation_no_consent_latency_ns"),
+        ("ablation_no_acceptance", "ablation_no_acceptance_allowed", "ablation_no_acceptance_reason_codes", "ablation_no_acceptance_latency_ns"),
+        ("ablation_no_checks", "ablation_no_checks_allowed", "ablation_no_checks_reason_codes", "ablation_no_checks_latency_ns"),
+    )
+    for label, decision_field, reason_field, latency_field in metrics_fields:
+        summary[label] = _metrics(outcomes, decision_field, reason_field, latency_field)
     summary["by_dataset"] = {
         dataset: {
             "scenario_count": sum(row["held_out"] is held_out for row in outcomes),
-            "strict": _metrics(
-                [row for row in outcomes if row["held_out"] is held_out], "strict_allowed"
-            ),
-            "weak_boolean_baseline": _metrics(
-                [row for row in outcomes if row["held_out"] is held_out],
-                "weak_baseline_allowed",
-            ),
+            **{
+                label: _metrics(
+                    [row for row in outcomes if row["held_out"] is held_out],
+                    decision_field, reason_field, latency_field,
+                )
+                for label, decision_field, reason_field, latency_field in metrics_fields
+            },
         }
         for dataset, held_out in (("development_seed", False), ("held_out_seed", True))
     }
@@ -348,6 +450,14 @@ def run_benchmark(
             "baseline_false_denials": sum(
                 row["oracle_allowed"] and not row["weak_baseline_allowed"] for row in rows
             ),
+            "ablation_false_allows": {
+                label: sum(not row["oracle_allowed"] and row[field] for row in rows)
+                for label, field in (
+                    ("no_consent", "ablation_no_consent_allowed"),
+                    ("no_acceptance", "ablation_no_acceptance_allowed"),
+                    ("no_checks", "ablation_no_checks_allowed"),
+                )
+            },
             "strict_reason_codes": sorted({
                 reason for row in rows for reason in row["strict_reason_codes"]
             }),
@@ -357,8 +467,13 @@ def run_benchmark(
         "seed": seed, "held_out_seed": held_out_seed, "count_per_seed": count,
         "scenario_classes": list(SCENARIO_CLASSES),
         "baseline": "deliberately weak boolean-gate comparator",
+        "ablations": [
+            "No scoped consent gate: replace scenario consent with current valid installation consent",
+            "No current acceptance gate: replace acceptances with current plan/configuration acceptance",
+            "No required-check gate: replace checks with passing current-version checks",
+        ],
+        "held_out_seed_prior_exposure": False,
         "no_held_out_tuning": True,
-        "warmup_calls_per_implementation": 1,
         "warmup_calls_per_implementation": 1,
     }
     config_sha = sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
@@ -439,8 +554,9 @@ def run_benchmark(
             "strict_catalog": sorted(_REASON_CATALOG),
         },
         "correlation_note": (
-            "Generated scenarios are deterministic policy cases, not independent human observations; "
-            "Wilson intervals are descriptive scenario-level uncertainty only."
+            "Scenario cases are deterministically generated and balanced by class. Rates are exact "
+            "fractions for this workload; there is no inferential interval or population uncertainty "
+            "estimate. Cases within classes are correlated by construction."
         ),
         "oracle_limitations": (
             "The oracle is separately implemented from the policy decision function but shares the "

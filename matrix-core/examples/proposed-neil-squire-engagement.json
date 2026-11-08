@@ -13,6 +13,7 @@
       "name": "Neil Squire",
       "jurisdiction": "CA-NB",
       "verification_evidence_id": null,
+      "authorized_recipients": [],
       "status": "proposed"
     },
     {
@@ -27,7 +28,7 @@
       "updated_at": "2026-11-08T12:00:00Z",
       "organization_id": "b0000000-0000-4000-8000-000000000001",
       "status": "proposed",
-      "scope": ["exploratory_proposal_only"],
+      "scope": [],
       "agreement_evidence_id": null,
       "signer_id": null,
       "signer_authority_evidence_id": null,

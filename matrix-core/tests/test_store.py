@@ -16,7 +16,10 @@ from support import (
 )
 
 
-FINANCE_ACTOR = {"id": FACILITATOR, "tenant_id": "10000000-0000-4000-8000-000000000001", "role": "finance_approver"}
+FINANCE_ACTOR = {
+    "id": FACILITATOR, "tenant_id": "10000000-0000-4000-8000-000000000001",
+    "environment": "sandbox", "role": "finance_approver",
+}
 
 
 class ReferenceStoreTests(unittest.TestCase):
@@ -42,7 +45,8 @@ class ReferenceStoreTests(unittest.TestCase):
             PAYMENT,
             {
                 "id": "30000000-0000-4000-8000-000000000001",
-                "tenant_id": "11000000-0000-4000-8000-000000000001",
+                "tenant_id": FINANCE_ACTOR["tenant_id"],
+                "environment": "sandbox",
                 "role": "participant",
             },
             NOW,
@@ -51,6 +55,55 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertIn("ACTOR_ROLE_UNAUTHORIZED", unauthorized.reason_codes)
         rows = {row["id"]: row for row in store.snapshot()}
         self.assertEqual(rows["80000000-0000-4000-8000-000000000001"]["reserved_minor"], 100)
+
+    def test_foreign_tenant_environment_and_revoked_permission_deny_replay(self):
+        store = self.store()
+        store.reserve_payment(PAYMENT, FINANCE_ACTOR, NOW, 1)
+        for actor_value, expected in (
+            ({**FINANCE_ACTOR, "tenant_id": "11000000-0000-4000-8000-000000000001"}, "TENANT_MISMATCH"),
+            ({**FINANCE_ACTOR, "environment": "test"}, "ENVIRONMENT_MISMATCH"),
+            ({**FINANCE_ACTOR, "role": "participant"}, "ACTOR_ROLE_UNAUTHORIZED"),
+        ):
+            decision, result = store.reserve_payment(PAYMENT, actor_value, NOW, 1)
+            self.assertIn(expected, decision.reason_codes)
+            self.assertIsNone(result)
+        records = finance_records()
+        permission = next(row for row in records if row.get("action") == "reserve_payment")
+        permission["revoked_at"] = "2026-11-08T12:30:00Z"
+        decision, result = self.store(records).reserve_payment(PAYMENT, FINANCE_ACTOR, NOW, 1)
+        self.assertIn("ACTOR_PERMISSION_MISSING_REVOKED_OR_EXPIRED", decision.reason_codes)
+        self.assertIsNone(result)
+
+    def test_reserved_replay_rejects_altered_request_and_malformed_inputs(self):
+        reserved, snapshot = None, None
+        store = self.store()
+        reserved, _ = store.reserve_payment(PAYMENT, FINANCE_ACTOR, NOW, 1)
+        snapshot = store.snapshot()
+        payment = next(row for row in snapshot if row.get("record_type") == "payment_intent")
+        payment["money"]["amount_minor"] += 1
+        decision, result = self.store(snapshot).reserve_payment(
+            PAYMENT, FINANCE_ACTOR, NOW, 1
+        )
+        self.assertIn("AUTHORIZATION_INVALID_EXPIRED_OR_REPLAYED", decision.reason_codes)
+        self.assertIsNone(result)
+        for payment_id, actor_value, revision in (
+            ([], FINANCE_ACTOR, 1),
+            (PAYMENT, None, 1),
+            (PAYMENT, FINANCE_ACTOR, True),
+        ):
+            decision, result = self.store().reserve_payment(
+                payment_id, actor_value, NOW, revision
+            )
+            self.assertFalse(decision.allowed)
+            self.assertIsNone(result)
+
+    def test_duplicate_ids_reject_store_before_dictionary_use(self):
+        records = finance_records()
+        records.append(deepcopy(records[0]))
+        store = self.store(records)
+        decision, result = store.reserve_payment(PAYMENT, FINANCE_ACTOR, NOW, 1)
+        self.assertIn("DUPLICATE_RECORD_ID", decision.reason_codes)
+        self.assertIsNone(result)
 
     def test_changed_authorization_or_stale_revision_denies(self):
         records = finance_records()
@@ -64,7 +117,7 @@ class ReferenceStoreTests(unittest.TestCase):
     def test_budget_overspend_and_unauthorized_actor_deny(self):
         records = finance_records(amount=151, limit=150)
         records[0]["request_digest"] = canonical_request_digest(
-            records[0], FACILITATOR, 1
+            records[0], FACILITATOR, 1, "finance_approver"
         )
         records[1]["request_digest"] = records[0]["request_digest"]
         store = self.store(records)
@@ -109,7 +162,7 @@ class ReferenceStoreTests(unittest.TestCase):
             NOW,
             2,
         )
-        self.assertIn("AUTHORIZATION_INVALID_EXPIRED_OR_REPLAYED", unauthorized.reason_codes)
+        self.assertIn("ACTOR_PERMISSION_MISSING_REVOKED_OR_EXPIRED", unauthorized.reason_codes)
         unknown = store.record_unknown_outcome(PAYMENT, FINANCE_ACTOR, NOW, 2)
         self.assertTrue(unknown.allowed)
         self.assertEqual(
@@ -133,14 +186,24 @@ class ReferenceStoreTests(unittest.TestCase):
             authorization_id="a1000000-0000-4000-8000-000000000001",
             reconciliation_evidence_id=None,
         )
-        retry["request_digest"] = canonical_request_digest(retry, FACILITATOR, 1)
+        retry["request_digest"] = canonical_request_digest(
+            retry, FACILITATOR, 1, "finance_approver"
+        )
         retry_auth = deepcopy(original_auth)
         retry_auth.update(
             id=retry["authorization_id"], target_id=retry["id"],
             target_revision=1, request_digest=retry["request_digest"],
             consumed_at=None, revision=1,
         )
-        store = self.store([*records, retry, retry_auth])
+        retry_permissions = []
+        for index, row in enumerate(
+            row for row in records if row.get("record_type") == "actor_permission"
+        ):
+            permission = deepcopy(row)
+            permission["id"] = f"77000000-0000-4000-8000-{index + 1:012d}"
+            permission["target_id"] = retry["id"]
+            retry_permissions.append(permission)
+        store = self.store([*records, retry, retry_auth, *retry_permissions])
         decision, _ = store.reserve_payment(retry["id"], FINANCE_ACTOR, NOW, 1)
         self.assertIn("RECONCILIATION_REQUIRED_NO_RETRY", decision.reason_codes)
 
@@ -172,7 +235,9 @@ class ReferenceStoreTests(unittest.TestCase):
         second["id"] = "91000000-0000-4000-8000-000000000001"
         second["idempotency_key"] = "synthetic-key-0002"
         second["authorization_id"] = "a1000000-0000-4000-8000-000000000001"
-        second["request_digest"] = canonical_request_digest(second, FACILITATOR, 1)
+        second["request_digest"] = canonical_request_digest(
+            second, FACILITATOR, 1, "finance_approver"
+        )
         second_authorization = dict(records[1])
         second_authorization.update(
             id=second["authorization_id"],
@@ -180,7 +245,16 @@ class ReferenceStoreTests(unittest.TestCase):
             target_id=second["id"],
             request_digest=second["request_digest"],
         )
-        store = self.store([*records, second, second_authorization])
+        second_permission = deepcopy(next(
+            row for row in records
+            if row.get("record_type") == "actor_permission"
+            and row.get("action") == "reserve_payment"
+        ))
+        second_permission.update(
+            id="78000000-0000-4000-8000-000000000001",
+            target_id=second["id"],
+        )
+        store = self.store([*records, second, second_authorization, second_permission])
         barrier = Barrier(2)
 
         def reserve(identifier):
