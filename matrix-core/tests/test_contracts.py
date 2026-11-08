@@ -96,14 +96,16 @@ class ContractTests(unittest.TestCase):
     def test_installation_cannot_disable_all_required_checks(self):
         records = activation_records()
         installation = next(row for row in records if row["record_type"] == "installation")
-        installation["required_check_types"] = []
+        installation["required_check_types"] = ["physical_safety"]
         self.assertTrue(validate_records(records))
         from matrix_core.policy import decide_activation
         from support import NOW, INSTALLATION, actor
         self.assertIn(
-            "SCHEMA_INVALID:$",
+            "TRUSTED_INSTALLATION_POLICY_MISMATCH",
             decide_activation(records, INSTALLATION, actor(), NOW).reason_codes,
         )
+        installation["required_check_types"] = []
+        self.assertIn("SCHEMA_INVALID:$", validate_records(records))
 
     def test_cross_tenant_links_are_rejected(self):
         records = activation_records()

@@ -23,6 +23,22 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(output["summary"]["strict"]["false_denials"], 0)
         self.assertGreater(output["summary"]["weak_boolean_baseline"]["false_allows"], 0)
         self.assertTrue(output["config"]["no_held_out_tuning"])
+        self.assertEqual(
+            output["summary"]["strict"]["uncertainty"],
+            "No inferential interval: scenarios are deterministically generated and "
+            "stratified by policy class, not sampled from a deployment or human population.",
+        )
+        self.assertNotIn("false_allow_wilson_95", output["summary"]["strict"])
+        self.assertGreater(
+            output["summary"]["ablation_no_consent"]["false_allows"], 0
+        )
+        self.assertGreater(
+            output["summary"]["ablation_no_acceptance"]["false_allows"], 0
+        )
+        self.assertGreater(
+            output["summary"]["ablation_no_checks"]["false_allows"], 0
+        )
+        self.assertEqual(len(output["config"]["ablations"]), 3)
 
     def test_equal_development_and_held_out_seeds_are_rejected(self):
         with self.assertRaises(ValueError):
@@ -32,6 +48,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(sample_size(0.5, 0.1, 1.96), 97)
         with self.assertRaises(ValueError):
             sample_size(1.0, 0.1, 1.96)
+        with self.assertRaises(ValueError):
+            sample_size(0.5, 0.1, float("nan"))
 
 
 if __name__ == "__main__":

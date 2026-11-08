@@ -15,7 +15,9 @@ SCENARIO_CLASSES = (
     "valid", "missing_consent", "expired_consent", "revoked_consent",
     "missing_acceptance", "plan_changed", "missing_check", "stale_configuration",
     "stop_control", "cross_tenant_consent", "unreviewed_evidence",
-    "unauthorized_actor",
+    "unauthorized_actor", "empty_required_checks", "missing_equipment_manifest",
+    "conflicting_check_evidence", "stale_acceptance_configuration",
+    "cross_environment_membership", "missing_participant_reference",
 )
 
 
@@ -142,6 +144,28 @@ def build_activation_case(seed: int, scenario_class: str = "valid") -> dict[str,
         ))
     elif scenario_class == "unauthorized_actor":
         actor["role"] = "participant"
+    elif scenario_class == "empty_required_checks":
+        by_type["installation"]["required_check_types"] = []
+    elif scenario_class == "missing_equipment_manifest":
+        records.remove(by_type["equipment"])
+    elif scenario_class == "conflicting_check_evidence":
+        check = next(
+            row for row in records
+            if row.get("record_type") == "installation_check"
+            and row.get("check_type") == "physical_safety"
+        )
+        records.append({
+            **check, "id": _id(seed, "conflicting-safety-check"), "status": "failed",
+        })
+    elif scenario_class == "stale_acceptance_configuration":
+        by_type["participant_acceptance"]["configuration_version"] = "stale-config"
+    elif scenario_class == "cross_environment_membership":
+        next(
+            row for row in records
+            if row.get("record_type") == "membership" and row.get("role") == "safety_reviewer"
+        )["environment"] = "test"
+    elif scenario_class == "missing_participant_reference":
+        records.remove(next(row for row in records if row.get("id") == participant_id))
     return {
         "case_id": _id(seed, "case"),
         "scenario_class": scenario_class,

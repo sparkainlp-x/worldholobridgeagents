@@ -1,0 +1,33 @@
+{
+  "draft_status": "NOT UPLOADED - HUMAN AUTHOR AND GOVERNANCE REVIEW REQUIRED",
+  "title": "Participant-governed installation-core reference architecture and synthetic evaluation protocol",
+  "upload_type": "publication",
+  "publication_type": "workingpaper",
+  "description": "Working-paper source for a research-prototype reference architecture and synthetic policy evaluation protocol. No human research, deployment validation, live payments, confirmed partner, compliance certification, economic impact, or production readiness is claimed.",
+  "creators": [],
+  "creators_status": "TO BE COMPLETED AND APPROVED BY HUMAN AUTHORS; NONE INVENTED",
+  "publication_date": null,
+  "doi": null,
+  "license_proposal": "CC-BY-4.0",
+  "license_scope": "Proposed paper license only; subject to all human authors' approval and does not alter repository software/documentation licensing.",
+  "keywords": [
+    "participant governance",
+    "accessibility",
+    "reference architecture",
+    "synthetic software-policy evaluation"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://zenodo.org/records/23644437",
+      "relation": "isderivedfrom",
+      "resource_type": "publication"
+    }
+  ],
+  "funding": [],
+  "affiliations": [],
+  "communities": [],
+  "notes": [
+    "Prior-work link is attribution only; no affiliation or endorsement is implied.",
+    "No upload, registration, or new DOI is authorized by this draft."
+  ]
+}

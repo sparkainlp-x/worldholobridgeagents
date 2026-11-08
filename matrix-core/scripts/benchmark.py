@@ -38,6 +38,9 @@ _REASON_CATALOG = {
     "REQUIRED_CHECK_MISSING_STALE_OR_UNREVIEWED", "STOP_CONTROL_ACTIVE",
     "TENANT_MISMATCH", "DUPLICATE_RECORD_ID", "CROSS_TENANT_REFERENCE",
     "RELATIONSHIP_TARGET_MISSING", "RELATIONSHIP_TARGET_TYPE_INVALID",
+    "CROSS_ENVIRONMENT_REFERENCE", "TRUSTED_INSTALLATION_POLICY_MISMATCH",
+    "PARTICIPANT_MEMBERSHIP_MISSING_OR_INACTIVE", "PARTICIPANTS_REQUIRED",
+    "SCHEMA_INVALID:$",
 }
 _ORACLE_SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 _ORACLE_VALIDATOR = Draft202012Validator(
@@ -63,6 +66,12 @@ def contract_oracle(case: dict[str, Any]) -> bool:
     if not installation or installation.get("record_type") != "installation":
         return False
     if installation["tenant_id"] != tenant_id:
+        return False
+    if (
+        installation.get("installation_policy_version") != "matrix-installation-v0.1.0"
+        or set(installation.get("required_check_types", []))
+        != {"accessibility", "physical_safety"}
+    ):
         return False
     if installation["status"] not in {"draft", "ready"} or installation["stop_requested"]:
         return False
@@ -98,10 +107,24 @@ def contract_oracle(case: dict[str, Any]) -> bool:
             or participant.get("tenant_id") != tenant_id or participant.get("status") != "active"
         ):
             return False
+        if not any(
+            row.get("record_type") == "membership"
+            and row.get("installation_id") == installation["id"]
+            and row.get("participant_id") == participant_id
+            and row.get("tenant_id") == tenant_id
+            and row.get("environment") == installation["environment"]
+            and row.get("role") == "participant"
+            and row.get("active") is True
+            and (row.get("valid_until") is None or _time(row["valid_until"]) > case["now"])
+            for row in records
+        ):
+            return False
         consent_ok = any(
             row.get("record_type") == "consent"
             and row.get("participant_id") == participant_id
             and row.get("tenant_id") == tenant_id
+            and row.get("environment") == installation["environment"]
+            and row.get("installation_id") == installation["id"]
             and row.get("purpose") == "installation_activation"
             and row.get("recipient") == "matrix-core"
             and "installation_status" in row.get("field_scopes", [])
@@ -119,24 +142,38 @@ def contract_oracle(case: dict[str, Any]) -> bool:
             and row.get("plan_version_id") == installation["plan_version_id"]
             and row.get("equipment_manifest_version_id")
             == installation["equipment_manifest_version_id"]
+            and row.get("configuration_version") == installation["configuration_version"]
             and row.get("withdrawn_at") is None
             and _time(row["accepted_at"]) <= case["now"]
             for row in records
         )
         if not acceptance_ok:
             return False
-    equipment_ok = any(
+    equipment_candidates = [
+        row for row in records
+        if row.get("record_type") == "equipment"
+        and row.get("installation_id") == installation["id"]
+        and row.get("tenant_id") == tenant_id
+        and row.get("environment") == installation["environment"]
+        and row.get("manifest_version_id") == installation["equipment_manifest_version_id"]
+    ]
+    equipment_ok = len(equipment_candidates) == 1 and any(
         row.get("record_type") == "equipment"
         and row.get("installation_id") == installation["id"]
         and row.get("tenant_id") == tenant_id
         and row.get("manifest_version_id") == installation["equipment_manifest_version_id"]
         and row.get("review_status") == "reviewed"
+        and all(
+            item.get("configuration_version") == installation["configuration_version"]
+            for item in row.get("items", [])
+        )
         and _time(row["reviewed_at"]) <= case["now"] < _time(row["expires_at"])
         and any(
             member.get("record_type") == "membership"
             and member.get("installation_id") == installation["id"]
             and member.get("participant_id") == row.get("reviewed_by")
             and member.get("tenant_id") == tenant_id
+            and member.get("environment") == installation["environment"]
             and member.get("active") is True
             and member.get("role")
             in {"safety_reviewer", "accessibility_lead", "tenant_admin"}
@@ -151,7 +188,17 @@ def contract_oracle(case: dict[str, Any]) -> bool:
     if not equipment_ok:
         return False
     for required in installation["required_check_types"]:
-        check_ok = any(
+        candidates = [
+            row for row in records
+            if row.get("record_type") == "installation_check"
+            and row.get("installation_id") == installation["id"]
+            and row.get("tenant_id") == tenant_id
+            and row.get("environment") == installation["environment"]
+            and row.get("check_type") == required
+            and row.get("configuration_version") == installation["configuration_version"]
+            and _time(row["expires_at"]) > case["now"]
+        ]
+        check_ok = len(candidates) == 1 and any(
             row.get("record_type") == "installation_check"
             and row.get("installation_id") == installation["id"]
             and row.get("tenant_id") == tenant_id
@@ -164,6 +211,7 @@ def contract_oracle(case: dict[str, Any]) -> bool:
                 and member.get("installation_id") == installation["id"]
                 and member.get("participant_id") == row.get("reviewed_by")
                 and member.get("tenant_id") == tenant_id
+                and member.get("environment") == installation["environment"]
                 and member.get("active") is True
                 and member.get("role")
                 in {"safety_reviewer", "accessibility_lead", "tenant_admin"}
@@ -353,6 +401,8 @@ def run_benchmark(
     )
     weak_boolean_baseline(warmup)
     contract_oracle(warmup)
+    for gate in ("consent", "acceptance", "checks"):
+        _run_ablation(warmup, gate)
     outcomes: list[dict[str, Any]] = []
     class_results: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for dataset_seed, held_out in ((seed, False), (held_out_seed, True)):
@@ -458,6 +508,14 @@ def run_benchmark(
                     ("no_checks", "ablation_no_checks_allowed"),
                 )
             },
+            "ablation_false_denials": {
+                label: sum(row["oracle_allowed"] and not row[field] for row in rows)
+                for label, field in (
+                    ("no_consent", "ablation_no_consent_allowed"),
+                    ("no_acceptance", "ablation_no_acceptance_allowed"),
+                    ("no_checks", "ablation_no_checks_allowed"),
+                )
+            },
             "strict_reason_codes": sorted({
                 reason for row in rows for reason in row["strict_reason_codes"]
             }),
@@ -472,7 +530,7 @@ def run_benchmark(
             "No current acceptance gate: replace acceptances with current plan/configuration acceptance",
             "No required-check gate: replace checks with passing current-version checks",
         ],
-        "held_out_seed_prior_exposure": False,
+        "held_out_seed_prior_exposure": held_out_seed == 2026,
         "no_held_out_tuning": True,
         "warmup_calls_per_implementation": 1,
     }
@@ -569,7 +627,7 @@ def run_benchmark(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=17)
-    parser.add_argument("--held-out-seed", type=int, default=2026)
+    parser.add_argument("--held-out-seed", type=int, default=918273)
     parser.add_argument("--count", type=int, default=120, help="scenarios per seed")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

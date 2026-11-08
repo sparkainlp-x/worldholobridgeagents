@@ -265,6 +265,13 @@ class ReferralPolicyTests(unittest.TestCase):
             "JURISDICTION_UNKNOWN_OR_ORGANIZATION_UNVERIFIED",
             self.decide({"UNKNOWN"}).reason_codes,
         )
+        records, referral_id = referral_records()
+        referral = next(row for row in records if row["record_type"] == "referral")
+        referral["recipient"] = "unapproved-recipient"
+        self.assertIn(
+            "REFERRAL_SCOPE_CONSENT_MISSING",
+            decide_referral(records, referral_id, actor(), NOW, {"CA-NB"}).reason_codes,
+        )
 
     def test_revoke_or_foreign_tenant_denies(self):
         consent = next(
@@ -491,6 +498,54 @@ class StopAndWithdrawalTests(unittest.TestCase):
         )
         self.assertTrue(repeated.allowed)
         self.assertIn("PARTICIPANT_ALREADY_WITHDRAWN", repeated.reason_codes)
+
+    def test_withdrawal_after_activation_revokes_multiple_acceptances_and_referrals(self):
+        records, _ = referral_records()
+        installation = next(row for row in records if row.get("record_type") == "installation")
+        historical_plan = "59000000-0000-4000-8000-000000000001"
+        acceptance = next(
+            row for row in records if row.get("record_type") == "participant_acceptance"
+        )
+        records.append({
+            **acceptance,
+            "id": "55000000-0000-4000-8000-000000000001",
+            "plan_version_id": historical_plan,
+        })
+        decision, updated = withdraw_participant(
+            records, INSTALLATION, PARTICIPANT,
+            {"id": PARTICIPANT, "tenant_id": TENANT, "role": "participant"},
+            NOW, "d8200000-0000-4000-8000-000000000001",
+        )
+        self.assertTrue(decision.allowed)
+        acceptances = [
+            row for row in updated
+            if row.get("record_type") == "participant_acceptance"
+        ]
+        self.assertEqual(len(acceptances), 2)
+        self.assertTrue(all(row["withdrawn_at"] is not None for row in acceptances))
+        referral = next(row for row in updated if row.get("record_type") == "referral")
+        self.assertEqual(referral["status"], "revoked")
+        self.assertFalse(decide_referral(
+            updated, referral["id"], actor(), NOW, {"CA-NB"}
+        ).allowed)
+
+    def test_withdrawal_after_reference_activation_is_allowed_without_finance(self):
+        activation, active = activate_installation(
+            activation_records(), INSTALLATION, actor(), NOW,
+            expected_revision=1,
+            audit_event_id="d8300000-0000-4000-8000-000000000001",
+        )
+        self.assertTrue(activation.allowed)
+        withdrawal, updated = withdraw_participant(
+            active, INSTALLATION, PARTICIPANT,
+            {"id": PARTICIPANT, "tenant_id": TENANT, "role": "participant"},
+            NOW, "d8400000-0000-4000-8000-000000000001",
+        )
+        self.assertTrue(withdrawal.allowed)
+        installation = next(row for row in updated if row["record_type"] == "installation")
+        self.assertEqual(installation["status"], "stopped")
+        consent = next(row for row in updated if row.get("record_type") == "consent")
+        self.assertIsNotNone(consent["revoked_at"])
 
     def test_final_participant_withdrawal_stops_without_auto_resume(self):
         decision, updated = withdraw_participant(

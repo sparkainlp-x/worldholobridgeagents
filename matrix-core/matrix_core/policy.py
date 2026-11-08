@@ -776,10 +776,14 @@ def activate_installation(
     audit_event_id: str,
 ) -> tuple[Decision, list[dict[str, Any]]]:
     """Apply activation only when the current snapshot passes every policy gate."""
-    records = [dict(record) for record in records]
+    records = [
+        dict(record) if isinstance(record, Mapping) else record for record in records
+    ]
     decision = decide_activation(records, installation_id, actor, now)
     if not decision.allowed:
         return decision, records
+    if type(expected_revision) is not int or expected_revision < 1:
+        return _decision(["EXPECTED_REVISION_INVALID"]), records
     installation = next(
         row for row in records
         if row.get("id") == installation_id and row.get("record_type") == "installation"
@@ -810,9 +814,17 @@ def withdraw_participant(
     audit_event_id: str,
 ) -> tuple[Decision, list[dict[str, Any]]]:
     """Withdraw one participant and leave other participants' state untouched."""
-    records = [dict(record) for record in records]
+    records = [
+        dict(record) if isinstance(record, Mapping) else record for record in records
+    ]
     if not _aware(now):
         return _decision(["CLOCK_NOT_TIMEZONE_AWARE"]), records
+    if (
+        not isinstance(installation_id, str)
+        or not isinstance(participant_id, str)
+        or not isinstance(actor, Mapping)
+    ):
+        return _decision(["PARTICIPANT_WITHDRAWAL_REQUEST_INVALID"]), records
     errors = list(validate_records(records))
     if errors:
         return _decision(errors), records
@@ -931,7 +943,11 @@ def _timestamp(value: datetime) -> str:
 
 
 def _aware(value: datetime) -> bool:
-    return value.tzinfo is not None and value.utcoffset() is not None
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() is not None
+    )
 
 
 def _evidence_is_current(
