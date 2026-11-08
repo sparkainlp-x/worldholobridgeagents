@@ -1,0 +1,43 @@
+name: Matrix installation-core
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: matrix-core/requirements.txt
+      - name: Install pinned dependencies
+        run: python -m pip install -r matrix-core/requirements.txt
+      - name: Run schema, policy, boundary, concurrency, and example tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONPATH: matrix-core
+        run: python -m unittest discover -s matrix-core/tests -v
+      - name: Run synthetic reference flow
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONPATH: matrix-core
+        run: python matrix-core/examples/end_to_end.py
+      - name: Smoke-test seeded benchmark and sensitivity planner
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONPATH: matrix-core
+        run: |
+          python matrix-core/scripts/benchmark.py --seed 17 --held-out-seed 2026 --count 12 --output "$RUNNER_TEMP/matrix-core-benchmark.json"
+          python matrix-core/scripts/sample_size_sensitivity.py

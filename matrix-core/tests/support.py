@@ -44,7 +44,8 @@ def activation_records():
             configuration_version="cfg-1", stop_requested=False,
             arena_enabled=True, arena_score=0,
         ),
-        record("participant", PARTICIPANT, display_label="Synthetic participant", status="active"),
+        record("participant", PARTICIPANT, status="active"),
+        record("participant", FACILITATOR, status="active"),
         record(
             "membership", "41000000-0000-4000-8000-000000000001",
             installation_id=INSTALLATION, participant_id=FACILITATOR,
@@ -56,6 +57,11 @@ def activation_records():
             role="safety_reviewer", active=True, valid_until=None,
         ),
         record(
+            "membership", "43000000-0000-4000-8000-000000000001",
+            installation_id=INSTALLATION, participant_id=FACILITATOR,
+            role="tenant_admin", active=True, valid_until=None,
+        ),
+        record(
             "consent", "51000000-0000-4000-8000-000000000001",
             participant_id=PARTICIPANT, purpose="installation_activation",
             recipient="matrix-core", field_scopes=["installation_status"],
@@ -65,7 +71,8 @@ def activation_records():
             "equipment", "61000000-0000-4000-8000-000000000001",
             installation_id=INSTALLATION, manifest_version_id=MANIFEST,
             items=[{"item_code": "display-1", "configuration_version": "cfg-1"}],
-            review_status="reviewed",
+            review_status="reviewed", reviewed_by=FACILITATOR,
+            reviewed_at=STAMP, expires_at=LATER,
         ),
         record(
             "installation_check", "62000000-0000-4000-8000-000000000001",
@@ -87,12 +94,14 @@ def actor(role="facilitator", tenant=TENANT):
 
 
 def finance_records(amount=100, limit=150):
+    approval_evidence_id = "71000000-0000-4000-8000-000000000001"
+    eligibility_evidence_id = "72000000-0000-4000-8000-000000000001"
     intent = record(
         "payment_intent", PAYMENT, environment="sandbox", state="draft",
         funding_case_id=FUNDING, budget_line_id=BUDGET, purpose="equipment",
         money={"amount_minor": amount, "currency": "CAD"},
         idempotency_key="synthetic-key-0001", request_digest="0" * 64,
-        authorization_id=AUTHORIZATION,
+        authorization_id=AUTHORIZATION, reconciliation_evidence_id=None,
     )
     intent["request_digest"] = canonical_request_digest(
         intent, FACILITATOR, intent["revision"]
@@ -107,13 +116,31 @@ def finance_records(amount=100, limit=150):
         intent,
         authorization,
         record(
-            "funding_case", FUNDING, status="approved", currency="CAD",
+            "funding_case", FUNDING, environment="sandbox",
+            status="approved", currency="CAD",
             approved_amount_minor=limit, permitted_purposes=["equipment"],
             eligibility_review_status="reviewed",
+            approval_evidence_id=approval_evidence_id,
+            eligibility_evidence_id=eligibility_evidence_id,
         ),
         record(
-            "budget_line", BUDGET, funding_case_id=FUNDING, purpose="equipment",
+            "budget_line", BUDGET, environment="sandbox",
+            funding_case_id=FUNDING, purpose="equipment",
             currency="CAD", limit_minor=limit, reserved_minor=0, settled_minor=0,
+        ),
+        record(
+            "evidence", approval_evidence_id, environment="sandbox",
+            subject_id=FUNDING, evidence_type="funding_approval",
+            provenance="synthetic fixture", review_status="reviewed",
+            execution_status="not_run", sha256="d" * 64, expires_at=LATER,
+            reviewed_by=FACILITATOR, reviewed_at=STAMP,
+        ),
+        record(
+            "evidence", eligibility_evidence_id, environment="sandbox",
+            subject_id=FUNDING, evidence_type="eligibility_review",
+            provenance="synthetic fixture", review_status="reviewed",
+            execution_status="not_run", sha256="e" * 64, expires_at=LATER,
+            reviewed_by=FACILITATOR, reviewed_at=STAMP,
         ),
     ]
 
@@ -123,22 +150,42 @@ def referral_records():
     organization_id = "b0000000-0000-4000-8000-000000000001"
     engagement_id = "c0000000-0000-4000-8000-000000000001"
     evidence_id = "d0000000-0000-4000-8000-000000000001"
+    authority_evidence_id = "d1000000-0000-4000-8000-000000000001"
+    organization_evidence_id = "d2000000-0000-4000-8000-000000000001"
     referral_id = "e0000000-0000-4000-8000-000000000001"
     records = activation_records()
+    next(row for row in records if row["record_type"] == "installation")["status"] = "active"
     records.extend([
+        record(
+            "evidence", organization_evidence_id, subject_id=organization_id,
+            evidence_type="organization_verification", provenance="synthetic fixture",
+            review_status="reviewed", execution_status="not_run", sha256="c" * 64,
+            expires_at=LATER, reviewed_by=FACILITATOR, reviewed_at=STAMP,
+        ),
         record(
             "organization", organization_id, name="Synthetic organization",
             jurisdiction="CA-NB", status="verified",
+            verification_evidence_id=organization_evidence_id,
         ),
         record(
             "evidence", evidence_id, subject_id=engagement_id,
             evidence_type="partner_agreement", provenance="synthetic fixture",
-            review_status="reviewed", execution_status="passed",
-            sha256="a" * 64, reviewed_by=FACILITATOR, reviewed_at=STAMP,
+            review_status="reviewed", execution_status="not_run",
+            sha256="a" * 64, expires_at=LATER,
+            reviewed_by=FACILITATOR, reviewed_at=STAMP,
+        ),
+        record(
+            "evidence", authority_evidence_id, subject_id=organization_id,
+            evidence_type="signer_authority", provenance="synthetic fixture",
+            review_status="reviewed", execution_status="not_run",
+            sha256="b" * 64, expires_at=LATER,
+            reviewed_by=FACILITATOR, reviewed_at=STAMP,
         ),
         record(
             "partner_engagement", engagement_id, organization_id=organization_id,
-            status="signed", scope=["referral:accessibility"], agreement_evidence_id=evidence_id,
+            status="signed", scope=["referral:accessibility"],
+            agreement_evidence_id=evidence_id, signer_id=FACILITATOR,
+            signer_authority_evidence_id=authority_evidence_id,
             publicity_permission=False,
         ),
         record(

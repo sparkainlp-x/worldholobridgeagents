@@ -27,11 +27,49 @@
   "$defs": {
     "uuid": { "type": "string", "format": "uuid" },
     "timestamp": { "type": "string", "format": "date-time" },
-    "scope": {
+    "engagement_scope": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": {
+        "enum": [
+          "exploratory_proposal_only", "referral:accessibility",
+          "referral:device_setup", "referral:learning_access",
+          "technical_support", "equipment_provision", "infrastructure_funding",
+          "research_collaboration"
+        ]
+      },
       "uniqueItems": true,
       "minItems": 1
+    },
+    "field_scopes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "installation_status", "accessibility_preferences",
+          "preferred_contact_method", "referral_status", "accommodation_codes",
+          "task_completion"
+        ]
+      },
+      "uniqueItems": true,
+      "minItems": 1
+    },
+    "consent_purpose": {
+      "enum": [
+        "installation_activation", "accessibility_support", "device_setup",
+        "learning_access", "research_evaluation", "publicity"
+      ]
+    },
+    "referral_purpose": {
+      "enum": ["accessibility_support", "device_setup", "learning_access"]
+    },
+    "financial_purpose": {
+      "enum": [
+        "equipment", "accessibility", "connectivity", "translation", "venue",
+        "software", "evaluation", "staffing", "community_event", "other_approved"
+      ]
+    },
+    "recipient": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._:-]{1,63}$"
     },
     "money": {
       "type": "object",
@@ -70,6 +108,10 @@
         "classification", "revision", "created_at", "updated_at"
       ]
     },
+    "record_envelope": {
+      "allOf": [{ "$ref": "#/$defs/envelope" }],
+      "unevaluatedProperties": false
+    },
     "installation": {
       "allOf": [
         { "$ref": "#/$defs/envelope" },
@@ -88,7 +130,7 @@
             "equipment_manifest_version_id": { "$ref": "#/$defs/uuid" },
             "required_check_types": {
               "type": "array", "items": { "type": "string", "minLength": 1 },
-              "uniqueItems": true
+              "uniqueItems": true, "minItems": 1
             },
             "configuration_version": { "type": "string", "minLength": 1 },
             "stop_requested": { "type": "boolean" },
@@ -111,10 +153,9 @@
           "type": "object",
           "properties": {
             "record_type": { "const": "participant" },
-            "display_label": { "type": "string", "minLength": 1, "maxLength": 80 },
             "status": { "enum": ["active", "withdrawn", "inactive"] }
           },
-          "required": ["display_label", "status"]
+          "required": ["status"]
         }
       ],
       "unevaluatedProperties": false
@@ -146,7 +187,15 @@
             "record_type": { "const": "access_preferences" },
             "participant_id": { "$ref": "#/$defs/uuid" },
             "accommodation_codes": {
-              "type": "array", "items": { "type": "string", "minLength": 1 },
+              "type": "array",
+              "items": {
+                "enum": [
+                  "captions", "reduced_motion", "keyboard_access",
+                  "screen_reader", "plain_language", "quiet_space",
+                  "offline_access", "translation", "physical_access",
+                  "photosensitivity"
+                ]
+              },
               "uniqueItems": true
             },
             "sharing_scope": { "enum": ["participant-only", "installation-team"] }
@@ -164,9 +213,9 @@
           "properties": {
             "record_type": { "const": "consent" },
             "participant_id": { "$ref": "#/$defs/uuid" },
-            "purpose": { "type": "string", "minLength": 1 },
-            "recipient": { "type": "string", "minLength": 1 },
-            "field_scopes": { "$ref": "#/$defs/scope" },
+            "purpose": { "$ref": "#/$defs/consent_purpose" },
+            "recipient": { "$ref": "#/$defs/recipient" },
+            "field_scopes": { "$ref": "#/$defs/field_scopes" },
             "valid_from": { "$ref": "#/$defs/timestamp" },
             "expires_at": { "$ref": "#/$defs/timestamp" },
             "revoked_at": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
@@ -200,9 +249,15 @@
                 "additionalProperties": false
               }
             },
-            "review_status": { "enum": ["unreviewed", "reviewed", "rejected"] }
+            "review_status": { "enum": ["unreviewed", "reviewed", "rejected"] },
+            "reviewed_by": { "$ref": "#/$defs/uuid" },
+            "reviewed_at": { "$ref": "#/$defs/timestamp" },
+            "expires_at": { "$ref": "#/$defs/timestamp" }
           },
-          "required": ["installation_id", "manifest_version_id", "items", "review_status"]
+          "required": [
+            "installation_id", "manifest_version_id", "items", "review_status",
+            "reviewed_by", "reviewed_at", "expires_at"
+          ]
         }
       ],
       "unevaluatedProperties": false
@@ -261,9 +316,22 @@
             "record_type": { "const": "organization" },
             "name": { "type": "string", "minLength": 1, "maxLength": 120 },
             "jurisdiction": { "type": "string", "minLength": 1 },
+            "verification_evidence_id": {
+              "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+            },
             "status": { "enum": ["proposed", "verified", "inactive"] }
           },
-          "required": ["name", "jurisdiction", "status"]
+          "required": ["name", "jurisdiction", "verification_evidence_id", "status"],
+          "allOf": [
+            {
+              "if": { "properties": { "status": { "const": "verified" } }, "required": ["status"] },
+              "then": {
+                "properties": {
+                  "verification_evidence_id": { "$ref": "#/$defs/uuid" }
+                }
+              }
+            }
+          ]
         }
       ],
       "unevaluatedProperties": false
@@ -277,11 +345,30 @@
             "record_type": { "const": "partner_engagement" },
             "organization_id": { "$ref": "#/$defs/uuid" },
             "status": { "enum": ["proposed", "signed", "ended"] },
-            "scope": { "$ref": "#/$defs/scope" },
+            "scope": { "$ref": "#/$defs/engagement_scope" },
             "agreement_evidence_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+            "signer_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+            "signer_authority_evidence_id": {
+              "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+            },
             "publicity_permission": { "type": "boolean" }
           },
-          "required": ["organization_id", "status", "scope", "agreement_evidence_id", "publicity_permission"]
+          "required": [
+            "organization_id", "status", "scope", "agreement_evidence_id",
+            "signer_id", "signer_authority_evidence_id", "publicity_permission"
+          ],
+          "allOf": [
+            {
+              "if": { "properties": { "status": { "const": "signed" } }, "required": ["status"] },
+              "then": {
+                "properties": {
+                  "agreement_evidence_id": { "$ref": "#/$defs/uuid" },
+                  "signer_id": { "$ref": "#/$defs/uuid" },
+                  "signer_authority_evidence_id": { "$ref": "#/$defs/uuid" }
+                }
+              }
+            }
+          ]
         }
       ],
       "unevaluatedProperties": false
@@ -296,9 +383,9 @@
             "installation_id": { "$ref": "#/$defs/uuid" },
             "organization_id": { "$ref": "#/$defs/uuid" },
             "partner_engagement_id": { "$ref": "#/$defs/uuid" },
-            "purpose": { "type": "string", "minLength": 1 },
-            "recipient": { "type": "string", "minLength": 1 },
-            "field_scopes": { "$ref": "#/$defs/scope" },
+            "purpose": { "$ref": "#/$defs/referral_purpose" },
+            "recipient": { "$ref": "#/$defs/recipient" },
+            "field_scopes": { "$ref": "#/$defs/field_scopes" },
             "status": { "enum": ["proposed", "enabled", "revoked"] },
             "record_type": { "const": "referral" }
           },
@@ -320,12 +407,34 @@
             "status": { "enum": ["proposed", "approved", "rejected", "closed"] },
             "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
             "approved_amount_minor": { "type": "integer", "minimum": 0 },
-            "permitted_purposes": { "$ref": "#/$defs/scope" },
+            "approval_evidence_id": {
+              "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+            },
+            "eligibility_evidence_id": {
+              "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+            },
+            "permitted_purposes": {
+              "type": "array", "items": { "$ref": "#/$defs/financial_purpose" },
+              "uniqueItems": true, "minItems": 1
+            },
             "eligibility_review_status": { "enum": ["unreviewed", "reviewed", "ineligible"] }
           },
           "required": [
             "status", "currency", "approved_amount_minor", "permitted_purposes",
-            "eligibility_review_status"
+            "eligibility_review_status", "approval_evidence_id",
+            "eligibility_evidence_id"
+          ],
+          "allOf": [
+            {
+              "if": { "properties": { "status": { "const": "approved" } }, "required": ["status"] },
+              "then": {
+                "properties": {
+                  "approval_evidence_id": { "$ref": "#/$defs/uuid" },
+                  "eligibility_review_status": { "const": "reviewed" },
+                  "eligibility_evidence_id": { "$ref": "#/$defs/uuid" }
+                }
+              }
+            }
           ]
         }
       ],
@@ -339,7 +448,7 @@
           "properties": {
             "record_type": { "const": "budget_line" },
             "funding_case_id": { "$ref": "#/$defs/uuid" },
-            "purpose": { "type": "string", "minLength": 1 },
+            "purpose": { "$ref": "#/$defs/financial_purpose" },
             "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
             "limit_minor": { "type": "integer", "minimum": 0 },
             "reserved_minor": { "type": "integer", "minimum": 0 },
@@ -364,15 +473,29 @@
             "state": { "enum": ["draft", "authorized", "reserved", "submitted", "unknown", "reconciliation_required", "settled", "cancelled", "failed"] },
             "funding_case_id": { "$ref": "#/$defs/uuid" },
             "budget_line_id": { "$ref": "#/$defs/uuid" },
-            "purpose": { "type": "string", "minLength": 1 },
+            "purpose": { "$ref": "#/$defs/financial_purpose" },
             "money": { "$ref": "#/$defs/money" },
             "idempotency_key": { "type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$" },
             "request_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-            "authorization_id": { "$ref": "#/$defs/uuid" }
+            "authorization_id": { "$ref": "#/$defs/uuid" },
+            "reconciliation_evidence_id": {
+              "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+            }
           },
           "required": [
             "state", "funding_case_id", "budget_line_id", "purpose",
-            "money", "idempotency_key", "request_digest", "authorization_id"
+            "money", "idempotency_key", "request_digest", "authorization_id",
+            "reconciliation_evidence_id"
+          ],
+          "allOf": [
+            {
+              "if": { "properties": { "state": { "const": "settled" } }, "required": ["state"] },
+              "then": {
+                "properties": {
+                  "reconciliation_evidence_id": { "$ref": "#/$defs/uuid" }
+                }
+              }
+            }
           ]
         }
       ],
@@ -388,6 +511,18 @@
             "enabled": { "type": "boolean" },
             "policy_approved": { "type": "boolean" },
             "revenue_basis": { "enum": ["net_received", "gross_received"] },
+            "eligible_revenue_minor": { "type": "integer", "minimum": 0 },
+            "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+            "funding_case_ids": {
+              "type": "array", "items": { "$ref": "#/$defs/uuid" },
+              "uniqueItems": true, "minItems": 1
+            },
+            "policy_approval_evidence_id": {
+              "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+            },
+            "funding_review_evidence_id": {
+              "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+            },
             "contractual_compensation_minor": { "type": "integer", "minimum": 0 },
             "allocation_basis_points": { "type": "integer", "minimum": 0, "maximum": 10000 },
             "funding_restrictions_reviewed": { "type": "boolean" },
@@ -395,8 +530,22 @@
           },
           "required": [
             "enabled", "policy_approved", "revenue_basis",
+            "eligible_revenue_minor", "currency", "funding_case_ids",
+            "policy_approval_evidence_id", "funding_review_evidence_id",
             "contractual_compensation_minor", "allocation_basis_points",
             "funding_restrictions_reviewed", "participant_benefit_deductions"
+          ],
+          "allOf": [
+            {
+              "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+              "then": {
+                "properties": {
+                  "policy_approved": { "const": true },
+                  "policy_approval_evidence_id": { "$ref": "#/$defs/uuid" },
+                  "funding_review_evidence_id": { "$ref": "#/$defs/uuid" }
+                }
+              }
+            }
           ]
         }
       ],
@@ -415,12 +564,27 @@
             "review_status": { "enum": ["unreviewed", "reviewed", "rejected"] },
             "execution_status": { "enum": ["not_run", "passed", "failed", "unknown"] },
             "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "expires_at": { "$ref": "#/$defs/timestamp" },
             "reviewed_by": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
             "reviewed_at": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
           },
           "required": [
             "subject_id", "evidence_type", "provenance", "review_status",
-            "execution_status", "sha256", "reviewed_by", "reviewed_at"
+            "execution_status", "sha256", "expires_at", "reviewed_by", "reviewed_at"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": { "review_status": { "const": "reviewed" } },
+                "required": ["review_status"]
+              },
+              "then": {
+                "properties": {
+                  "reviewed_by": { "$ref": "#/$defs/uuid" },
+                  "reviewed_at": { "$ref": "#/$defs/timestamp" }
+                }
+              }
+            }
           ]
         }
       ],
@@ -485,6 +649,7 @@
             "seed": { "type": "integer", "minimum": 0 },
             "config_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
             "code_revision": { "type": "string", "minLength": 1 },
+            "working_tree_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
             "schema_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
             "dependencies": {
               "type": "array",
@@ -492,11 +657,22 @@
               "uniqueItems": true
             },
             "run_command": { "type": "string", "minLength": 1 },
-            "runtime_metadata": { "type": "object", "additionalProperties": { "type": "string" } },
+            "runtime_metadata": {
+              "type": "object",
+              "properties": {
+                "python": { "type": "string" },
+                "platform": { "type": "string" },
+                "machine": { "type": "string" },
+                "processor": { "type": "string" },
+                "cpu_count": { "type": "string" }
+              },
+              "required": ["python", "platform", "machine", "processor", "cpu_count"],
+              "additionalProperties": false
+            },
             "held_out": { "type": "boolean" }
           },
           "required": [
-            "seed", "config_sha256", "code_revision", "schema_sha256",
+            "seed", "config_sha256", "code_revision", "working_tree_sha256", "schema_sha256",
             "dependencies", "run_command", "runtime_metadata", "held_out"
           ]
         }

@@ -1,8 +1,10 @@
 import unittest
 
 from matrix_core.policy import (
+    activate_installation,
     decide_activation,
     decide_referral,
+    decide_revenue_allocation,
     request_installation_stop,
     validate_records,
     withdraw_participant,
@@ -14,9 +16,12 @@ from support import (
     NOW,
     PARTICIPANT,
     TENANT,
+    FUNDING,
     activation_records,
     actor,
+    finance_records,
     referral_records,
+    record,
 )
 
 
@@ -28,6 +33,29 @@ class ActivationPolicyTests(unittest.TestCase):
         decision = self.decide(activation_records())
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.reason_codes, ("POLICY_REQUIREMENTS_MET",))
+
+    def test_reference_activation_records_audited_active_state(self):
+        decision, records = activate_installation(
+            activation_records(), INSTALLATION, actor(), NOW, expected_revision=1,
+            audit_event_id="d7000000-0000-4000-8000-000000000001",
+        )
+        self.assertTrue(decision.allowed)
+        installation = next(row for row in records if row["record_type"] == "installation")
+        self.assertEqual(installation["status"], "active")
+        self.assertEqual(installation["revision"], 2)
+        self.assertTrue(any(
+            row.get("record_type") == "audit_event" and row["action"] == "installation_activation"
+            for row in records
+        ))
+        stale, unchanged = activate_installation(
+            activation_records(), INSTALLATION, actor(), NOW, expected_revision=2,
+            audit_event_id="d7000000-0000-4000-8000-000000000002",
+        )
+        self.assertIn("STALE_REVISION", stale.reason_codes)
+        self.assertEqual(
+            next(row for row in unchanged if row["record_type"] == "installation")["status"],
+            "draft",
+        )
 
     def test_draft_installation_without_gates_is_denied(self):
         records = activation_records()
@@ -58,9 +86,19 @@ class ActivationPolicyTests(unittest.TestCase):
         self.assertIn("REQUIRED_CHECK_MISSING_STALE_OR_UNREVIEWED", self.decide(records).reason_codes)
         records = activation_records()
         records = [row for row in records if not (
-            row["record_type"] == "membership" and row["role"] == "safety_reviewer"
+            row["record_type"] == "membership"
+            and row["role"] in {"safety_reviewer", "accessibility_lead", "tenant_admin"}
         )]
         self.assertIn("REQUIRED_CHECK_MISSING_STALE_OR_UNREVIEWED", self.decide(records).reason_codes)
+
+    def test_expired_equipment_review_denies(self):
+        records = activation_records()
+        equipment = next(row for row in records if row["record_type"] == "equipment")
+        equipment["expires_at"] = "2026-11-08T13:00:00Z"
+        self.assertIn(
+            "EQUIPMENT_MANIFEST_UNREVIEWED_OR_STALE",
+            self.decide(records).reason_codes,
+        )
 
     def test_plan_or_equipment_change_invalidates_acceptance(self):
         for field in ("plan_version_id", "equipment_manifest_version_id"):
@@ -94,8 +132,15 @@ class ActivationPolicyTests(unittest.TestCase):
             "created_at": "2026-11-08T12:00:00Z", "updated_at": "2026-11-08T12:00:00Z",
             "subject_id": INSTALLATION, "evidence_type": "safety", "provenance": "synthetic",
             "review_status": "unreviewed", "execution_status": "unknown", "sha256": "b" * 64,
+            "expires_at": LATER,
             "reviewed_by": None, "reviewed_at": None,
         })
+        self.assertIn("EVIDENCE_UNREVIEWED_OR_UNKNOWN", self.decide(records).reason_codes)
+        records[-1]["review_status"] = "reviewed"
+        records[-1]["execution_status"] = "passed"
+        records[-1]["reviewed_by"] = FACILITATOR
+        records[-1]["reviewed_at"] = "2026-11-08T12:00:00Z"
+        records[-1]["expires_at"] = "2026-11-08T12:59:59Z"
         self.assertIn("EVIDENCE_UNREVIEWED_OR_UNKNOWN", self.decide(records).reason_codes)
 
     def test_seeded_time_boundaries_never_accept_expired_consent(self):
@@ -119,16 +164,56 @@ class ReferralPolicyTests(unittest.TestCase):
         self.assertTrue(self.decide().allowed)
         engagement = next(row for row in self.records if row["record_type"] == "partner_engagement")
         self.assertFalse(engagement["publicity_permission"])
+        engagement["publicity_permission"] = True
+        self.assertTrue(self.decide().allowed)
+
+    def test_referral_must_fit_the_signed_engagement_scope(self):
+        engagement = next(row for row in self.records if row["record_type"] == "partner_engagement")
+        engagement["scope"] = ["equipment_provision"]
+        self.assertIn("PARTNER_SCOPE_INSUFFICIENT", self.decide().reason_codes)
+
+    def test_signer_authority_and_agreement_review_must_be_current(self):
+        authority = next(
+            row for row in self.records
+            if row.get("evidence_type") == "signer_authority"
+        )
+        authority["review_status"] = "unreviewed"
+        self.assertIn("PARTNER_AGREEMENT_NOT_VERIFIED", self.decide().reason_codes)
+        authority["review_status"] = "reviewed"
+        authority["expires_at"] = "2026-11-08T13:00:00Z"
+        self.assertIn("PARTNER_AGREEMENT_NOT_VERIFIED", self.decide().reason_codes)
+        authority["expires_at"] = LATER
+        authority["reviewed_at"] = None
+        self.assertTrue(any(
+            reason.startswith("SCHEMA_INVALID:")
+            for reason in self.decide().reason_codes
+        ))
 
     def test_proposed_engagement_does_not_authorize_referral(self):
         next(row for row in self.records if row["record_type"] == "partner_engagement")["status"] = "proposed"
         self.assertIn("PARTNER_AGREEMENT_NOT_VERIFIED", self.decide().reason_codes)
 
+    def test_inactive_participant_cannot_be_referred(self):
+        next(row for row in self.records if row["record_type"] == "participant")["status"] = "inactive"
+        self.assertIn(
+            "INSTALLATION_OR_PARTICIPANT_NOT_ACTIVE",
+            self.decide().reason_codes,
+        )
+
     def test_scope_escalation_or_unknown_jurisdiction_denies(self):
         referral = next(row for row in self.records if row["record_type"] == "referral")
         referral["field_scopes"].append("diagnostic_details")
-        self.assertIn("REFERRAL_SCOPE_CONSENT_MISSING", self.decide().reason_codes)
+        self.assertTrue(any(
+            reason.startswith("SCHEMA_INVALID:")
+            for reason in self.decide().reason_codes
+        ))
         referral["field_scopes"].pop()
+        self.records.remove(next(
+            row for row in self.records
+            if row["record_type"] == "consent"
+            and row["purpose"] == "accessibility_support"
+        ))
+        self.assertIn("REFERRAL_SCOPE_CONSENT_MISSING", self.decide().reason_codes)
         self.assertIn(
             "JURISDICTION_UNKNOWN_OR_ORGANIZATION_UNVERIFIED",
             self.decide({"UNKNOWN"}).reason_codes,
@@ -152,6 +237,65 @@ class ReferralPolicyTests(unittest.TestCase):
         )
 
 
+class RevenueAllocationTests(unittest.TestCase):
+    def test_allocation_is_disabled_until_approval_compensation_and_restriction_review(self):
+        records = finance_records()
+        allocation = record(
+            "revenue_allocation", "f1000000-0000-4000-8000-000000000001",
+            environment="sandbox", enabled=False, policy_approved=False,
+            revenue_basis="net_received", eligible_revenue_minor=1000,
+            currency="CAD", funding_case_ids=[FUNDING],
+            policy_approval_evidence_id="f2000000-0000-4000-8000-000000000001",
+            funding_review_evidence_id="f3000000-0000-4000-8000-000000000001",
+            contractual_compensation_minor=100, allocation_basis_points=9000,
+            funding_restrictions_reviewed=False, participant_benefit_deductions=False,
+        )
+        records.extend([
+            allocation,
+            record(
+                "evidence", "f2000000-0000-4000-8000-000000000001",
+                environment="sandbox", subject_id=allocation["id"],
+                evidence_type="revenue_policy_approval", provenance="synthetic fixture",
+                review_status="reviewed", execution_status="not_run",
+                sha256="d" * 64, expires_at=LATER,
+                reviewed_by=FACILITATOR, reviewed_at="2026-11-08T12:00:00Z",
+            ),
+            record(
+                "evidence", "f3000000-0000-4000-8000-000000000001",
+                environment="sandbox", subject_id=allocation["id"],
+                evidence_type="funding_restriction_review", provenance="synthetic fixture",
+                review_status="reviewed", execution_status="not_run",
+                sha256="e" * 64, expires_at=LATER,
+                reviewed_by=FACILITATOR, reviewed_at="2026-11-08T12:00:00Z",
+            ),
+        ])
+        self.assertIn(
+            "REVENUE_ALLOCATION_DISABLED",
+            decide_revenue_allocation(records, allocation["id"], NOW).reason_codes,
+        )
+        allocation.update(
+            enabled=True, policy_approved=True, funding_restrictions_reviewed=True
+        )
+        self.assertTrue(decide_revenue_allocation(records, allocation["id"], NOW).allowed)
+        next(
+            row for row in records
+            if row.get("evidence_type") == "funding_restriction_review"
+        )["expires_at"] = "2026-11-08T13:00:00Z"
+        self.assertIn(
+            "FUNDING_RESTRICTION_EVIDENCE_MISSING_EXPIRED_OR_UNREVIEWED",
+            decide_revenue_allocation(records, allocation["id"], NOW).reason_codes,
+        )
+        next(
+            row for row in records
+            if row.get("evidence_type") == "funding_restriction_review"
+        )["expires_at"] = LATER
+        allocation["allocation_basis_points"] = 10000
+        self.assertIn(
+            "CONTRACTUAL_COMPENSATION_OR_REVENUE_BASIS_INVALID",
+            decide_revenue_allocation(records, allocation["id"], NOW).reason_codes,
+        )
+
+
 class StopAndWithdrawalTests(unittest.TestCase):
     def test_participant_stop_is_immediate_and_recorded_without_finance(self):
         records = activation_records()
@@ -172,6 +316,23 @@ class StopAndWithdrawalTests(unittest.TestCase):
             for row in stopped
         ))
 
+    def test_audit_event_ids_cannot_be_replayed_for_a_second_transition(self):
+        activated, active = activate_installation(
+            activation_records(), INSTALLATION, actor(), NOW, expected_revision=1,
+            audit_event_id="d7000000-0000-4000-8000-000000000001",
+        )
+        self.assertTrue(activated.allowed)
+        decision, unchanged = request_installation_stop(
+            active, INSTALLATION,
+            {"id": PARTICIPANT, "tenant_id": TENANT, "role": "participant"},
+            NOW, "d7000000-0000-4000-8000-000000000001",
+        )
+        self.assertIn("DUPLICATE_RECORD_ID", decision.reason_codes)
+        self.assertEqual(
+            next(row for row in unchanged if row["record_type"] == "installation")["status"],
+            "active",
+        )
+
     def test_shared_installation_withdrawal_is_participant_specific(self):
         second = "31000000-0000-4000-8000-000000000001"
         records = activation_records()
@@ -183,7 +344,7 @@ class StopAndWithdrawalTests(unittest.TestCase):
             row for row in records if row["record_type"] == "participant_acceptance"
         )
         records.extend([
-            {**participant, "id": second, "display_label": "Synthetic participant two"},
+            {**participant, "id": second},
             {
                 **consent, "id": "53000000-0000-4000-8000-000000000001",
                 "participant_id": second,
