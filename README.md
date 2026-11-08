@@ -38,6 +38,13 @@ worldholobridgeagents/
 │   ├── persona-lease-and-audit-ledger.md
 │   ├── failure-capsule-template.md
 │   └── minimum-budget-90-day-pilot.md
+├── matrix-core/
+│   ├── schemas/v0.1.0/
+│   ├── matrix_core/
+│   ├── examples/
+│   ├── tests/
+│   ├── scripts/
+│   └── docs/
 ├── docs/
 │   └── scientific-pilot-proposal.md
 ├── CONTRIBUTING.md
@@ -57,6 +64,7 @@ worldholobridgeagents/
 | **Failure Capsules** | Documents failed experiments, near misses, and lessons learned |
 | **Minimum Budget** | Provides an indicative 90-day pilot budget in USD |
 | **Scientific Pilot Proposal** | Frames the work as a community-led feasibility study |
+| **Matrix installation-core** | Versioned, synthetic-first installation contracts and reference policy; not a validated deployment |
 
 ## Minimum Viable Country Node
 
@@ -85,6 +93,10 @@ WorldHoloBridge uses an evidence-first approach:
 - **Failure capsules** make negative results useful and visible
 - **Reproducibility passports** make methods and assumptions inspectable
 - **No verified lower bound, no headline** prevents unsupported public claims
+
+## Matrix installation-core
+
+[`matrix-core/`](matrix-core/README.md) is a disability-led, participant-governed research prototype with strict versioned contracts, deterministic reference policy logic, synthetic evaluation, and a preregistration-style future feasibility protocol. It does not claim validated real-world outcomes, medical benefit, financial authorization, confirmed funding, or an affiliated partner. No human research or payment execution is performed.
 
 ## 90-day pilot
 
