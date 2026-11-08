@@ -11,6 +11,7 @@ This directory is a local, reviewable source package. It has not been deposited,
 - [`STATUS.md`](STATUS.md): distinguishes specified, implemented, executed, independently reviewed, and unresolved claims.
 - [`REQUIREMENTS-TO-EVIDENCE.md`](REQUIREMENTS-TO-EVIDENCE.md): requested correction to evidence/test traceability.
 - [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md): commands, outputs and artifact handling.
+- [`results/final-synthetic-benchmark.json`](results/final-synthetic-benchmark.json): raw deterministic workload output and execution manifest; not human or deployment evidence.
 
 Prior work: [Spark AI Matrix Country Prototype Framework, Zenodo record 23644437](https://zenodo.org/records/23644437). This package does not claim affiliation, authorship, endorsement, or a new DOI for that record.
 

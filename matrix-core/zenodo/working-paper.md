@@ -36,7 +36,11 @@ Comparisons include a deliberately weak boolean baseline and ablations replacing
 
 ### Results
 
-**UNRUN in this source draft.** Populate only from an actual execution of the documented final command and commit the unmodified raw export. Report all variant denominators and failures. Do not interpret synthetic false-allow rates as deployment-safety estimates.
+The fixed run used development seed 17 and held-out seed 918273, with 120 scenarios per seed (240 total). For the strict reference policy, false allows were 0/226 oracle-denied scenarios and false denials were 0/14 oracle-allowed scenarios; valid-action completion was 14/14. On the held-out split alone, these were 0/113 false allows, 0/7 false denials, and 7/7 valid-action completions. The deliberately weak boolean baseline had 161/226 false allows overall (81/113 held out), 0/14 false denials (0/7 held out), and 14/14 valid-action completions.
+
+The consent, acceptance, and required-check ablations produced respectively 53/226, 38/226, and 42/226 false allows. The held-out false-allow counts were 27/113, 19/113, and 21/113. All ablations had 0/14 false denials. Eighteen generated scenario classes had 12–14 cases each; class-level denominators and outcomes are included in the raw export. Strict-policy median/p95 decision latency was 35,983,707/44,122,212 ns; baseline latency was 9,157.5/11,230 ns. Timings are specific to the recorded runtime and hardware.
+
+This is a fixed, class-stratified deterministic workload, not an independent probability sample. Rates are descriptive only; no population confidence intervals or deployment-safety estimates are justified. The oracle independently computes expected labels from the contract but shares specification assumptions, so it is not an independent validator of the requirements. The held-out seed was not previously exposed or tuned against; the public generator and seed mean the run was not blinded. See [`results/final-synthetic-benchmark.json`](results/final-synthetic-benchmark.json) for raw cases, labels, decisions, per-class results, run command, hashes, dependency versions, and runtime metadata. The run used code revision `35e06e12698b5a8595691cb25426f0cbfbb580d7`; all 55 unit tests, the synthetic end-to-end example, and the assumption-only sample-size sensitivity script also completed successfully in that environment.
 
 ## 5. Future human feasibility protocol
 
@@ -44,4 +48,4 @@ Any human feasibility research is a separate future activity requiring appropria
 
 ## 6. Reproducibility and status
 
-See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md), [`STATUS.md`](STATUS.md), and [`REQUIREMENTS-TO-EVIDENCE.md`](REQUIREMENTS-TO-EVIDENCE.md). No DOI is assigned. Metadata remains incomplete and must be completed by human authors. The paper's proposed CC BY 4.0 license is separate from the repository's existing code/documentation licenses.
+See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md), [`STATUS.md`](STATUS.md), and [`REQUIREMENTS-TO-EVIDENCE.md`](REQUIREMENTS-TO-EVIDENCE.md). No DOI is assigned. Metadata remains incomplete and must be completed by human authors. The paper's proposed CC BY 4.0 license is separate from the repository's existing code/documentation licenses. Human feasibility research, external scientific replication, production security review, identity authentication, durable storage, live integrations, and physical-device validation remain unrun or unresolved.
