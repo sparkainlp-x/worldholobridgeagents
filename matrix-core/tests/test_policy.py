@@ -189,6 +189,14 @@ class ReferralPolicyTests(unittest.TestCase):
             for reason in self.decide().reason_codes
         ))
 
+    def test_signer_authority_must_match_engagement_signer(self):
+        authority = next(
+            row for row in self.records
+            if row.get("evidence_type") == "signer_authority"
+        )
+        authority["authorized_signer_id"] = "41000000-0000-4000-8000-000000000001"
+        self.assertIn("PARTNER_AGREEMENT_NOT_VERIFIED", self.decide().reason_codes)
+
     def test_proposed_engagement_does_not_authorize_referral(self):
         next(row for row in self.records if row["record_type"] == "partner_engagement")["status"] = "proposed"
         self.assertIn("PARTNER_AGREEMENT_NOT_VERIFIED", self.decide().reason_codes)

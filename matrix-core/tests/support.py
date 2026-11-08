@@ -179,6 +179,7 @@ def referral_records():
             evidence_type="signer_authority", provenance="synthetic fixture",
             review_status="reviewed", execution_status="not_run",
             sha256="b" * 64, expires_at=LATER,
+            authorized_signer_id=FACILITATOR,
             reviewed_by=FACILITATOR, reviewed_at=STAMP,
         ),
         record(

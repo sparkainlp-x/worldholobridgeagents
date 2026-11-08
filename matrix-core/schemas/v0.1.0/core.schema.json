@@ -566,7 +566,10 @@
             "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
             "expires_at": { "$ref": "#/$defs/timestamp" },
             "reviewed_by": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
-            "reviewed_at": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
+            "reviewed_at": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+            "authorized_signer_id": {
+              "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+            }
           },
           "required": [
             "subject_id", "evidence_type", "provenance", "review_status",
@@ -583,6 +586,18 @@
                   "reviewed_by": { "$ref": "#/$defs/uuid" },
                   "reviewed_at": { "$ref": "#/$defs/timestamp" }
                 }
+              }
+            },
+            {
+              "if": {
+                "properties": { "evidence_type": { "const": "signer_authority" } },
+                "required": ["evidence_type"]
+              },
+              "then": {
+                "properties": {
+                  "authorized_signer_id": { "$ref": "#/$defs/uuid" }
+                },
+                "required": ["authorized_signer_id"]
               }
             }
           ]

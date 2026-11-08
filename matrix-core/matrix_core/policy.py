@@ -516,6 +516,7 @@ def decide_referral(
         or signer_authority.get("tenant_id") != tenant_id
         or signer_authority.get("evidence_type") != "signer_authority"
         or signer_authority.get("subject_id") != engagement.get("organization_id")
+        or signer_authority.get("authorized_signer_id") != engagement.get("signer_id")
         or signer_authority.get("review_status") != "reviewed"
         or signer_authority.get("execution_status") in {"unknown", "failed"}
         or not _after(signer_authority.get("expires_at"), now)

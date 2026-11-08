@@ -10,7 +10,7 @@
 | Consent | Participant, explicit purpose, recipient, field scope, validity interval and revocation |
 | Equipment / check | Manifest version and reviewed configuration; reviewer, review time and expiry; check type, status, reviewer and expiry |
 | Participant acceptance | Exact plan and equipment versions accepted, time and withdrawal time |
-| Organization / engagement / referral | Proposal or verified status with verification evidence, explicit engagement scope, separately reviewed/unexpired agreement and signer-authority evidence, distinct publicity permission, and distinct referral recipient/purpose/field consent |
+| Organization / engagement / referral | Proposal or verified status with verification evidence, explicit engagement scope, separately reviewed/unexpired agreement and signer-authority evidence bound to the named signer, distinct publicity permission, and distinct referral recipient/purpose/field consent |
 | Funding case / budget / payment | Separate approval and eligibility evidence, allowed purpose, integer currency minor units, reserved/settled budget, sandbox intent and reviewed reconciliation evidence bound to a settled intent |
 | Revenue allocation | Optional and off by default; reviewed policy approval and funding-restriction evidence, eligible revenue basis, compensation; no participant wage/benefit deduction |
 | Evidence | Provenance, review status, execution status and SHA-256 integrity digest; hash is not proof of truth or authority |
